@@ -1,0 +1,25 @@
+// manifest.json
+{
+  "manifest_version": 3,
+  "name": "Gemini Transcript Extractor",
+  "version": "1.2",
+  "description": "Verifies Gemini search results, extracts conversation titles, and saves conversation transcripts.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads" // Added permission for downloading files
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
