@@ -82,6 +82,68 @@
         .abort-button:hover {
             background-color: #DC2626; /* Darker Red */
         }
+        .close-button {
+            background-color: #6B7280; /* Gray */
+            margin-top: 15px;
+            padding: 8px 16px;
+            font-size: 0.9rem;
+        }
+        .close-button:hover {
+            background-color: #4B5563; /* Darker Gray */
+        }
+        .download-section {
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 8px;
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+        }
+        .download-section h3 {
+            margin: 0 0 10px 0;
+            font-size: 1.1rem;
+            font-weight: bold;
+            color: #374151;
+        }
+        .download-all-btn {
+            background-color: #059669; /* Green */
+            color: white;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+            margin-bottom: 10px;
+            width: 100%;
+            border: none;
+        }
+        .download-all-btn:hover {
+            background-color: #047857; /* Darker Green */
+        }
+        .download-all-btn:disabled {
+            background-color: #9CA3AF;
+            cursor: not-allowed;
+        }
+        .download-links {
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .download-link-item {
+            margin-bottom: 5px;
+        }
+        .download-link {
+            color: #3B82F6;
+            text-decoration: none;
+            font-size: 0.9rem;
+            display: block;
+            padding: 5px;
+            border-radius: 4px;
+            background-color: #f1f5f9;
+            transition: background-color 0.2s ease;
+        }
+        .download-link:hover {
+            background-color: #e2e8f0;
+            color: #1e40af;
+        }
     </style>
 </head>
 <body>
@@ -100,6 +162,7 @@
 
         <button id="startAutomationBtn" class="button mt-4 hidden">Extract Transcripts</button>
         <button id="abortSearchBtn" class="button abort-button mt-2 hidden">Abort Search</button>
+        <button id="closePopupBtn" class="button close-button hidden">Close Extension</button>
 
         <div id="result" class="result-box">
             Loading...
