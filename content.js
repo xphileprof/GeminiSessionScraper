@@ -26,36 +26,54 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
     function extractTranscript() {
         console.log('content.js: extractTranscript - Starting transcript extraction.');
         let transcript = '';
-        // Select all conversation message containers
-        const conversationMessages = document.querySelectorAll('.conversation-container');
+        // Select all user-query elements (prompts)
+        const promptElements = document.querySelectorAll('user-query');
+        // Select all model-response elements (responses)
+        const responseElements = document.querySelectorAll('model-response');
 
-        if (conversationMessages.length === 0) {
-            console.warn('content.js: extractTranscript - No conversation messages found on page.');
+        const maxPairs = Math.max(promptElements.length, responseElements.length);
+        if (maxPairs === 0) {
+            console.warn('content.js: extractTranscript - No user-query or model-response elements found on page.');
         }
 
-        conversationMessages.forEach((messageContainer, index) => {
-            // Try to find the user query (prompt) within this container
-            const userQueryElement = messageContainer.querySelector('.user-query-bubble-with-background .query-text p');
-            if (userQueryElement) {
-                transcript += `--- PROMPT ${index + 1} ---\n`;
-                transcript += userQueryElement.innerText.trim() + '\n\n';
-                console.log(`content.js: extractTranscript - Extracted Prompt ${index + 1}.`);
-            } else {
-                console.warn(`content.js: extractTranscript - No user query found for message container ${index + 1}.`);
+        for (let i = 0; i < maxPairs; i++) {
+            // PROMPT
+            let promptText = '[Prompt not found]';
+            if (promptElements[i]) {
+                // Try to get all text from the prompt element, fallback to previous selector
+                let found = false;
+                // Try the p tag
+                const p = promptElements[i].querySelector('.user-query-bubble-with-background .query-text p');
+                if (p && p.innerText.trim()) {
+                    promptText = p.innerText.trim();
+                    found = true;
+                }
+                // Fallback: get all visible text
+                if (!found) {
+                    const allText = promptElements[i].innerText.trim();
+                    if (allText) promptText = allText;
+                }
             }
+            transcript += `--- PROMPT ${i + 1} ---\n` + promptText + '\n\n';
 
-            // Try to find the model response within this container
-            // Modified selector to target the main content area of the response
-            const modelResponseElement = messageContainer.querySelector('.model-response-text');
-            if (modelResponseElement) {
-                transcript += `--- RESPONSE ${index + 1} ---\n`;
-                // Get all text content from within the model-response-text element
-                transcript += modelResponseElement.innerText.trim() + '\n\n';
-                console.log(`content.js: extractTranscript - Extracted Response ${index + 1}.`);
-            } else {
-                console.warn(`content.js: extractTranscript - No model response found for message container ${index + 1} using '.model-response-text' selector.`);
+            // RESPONSE
+            let responseText = '[Response not found]';
+            if (responseElements[i]) {
+                // Try to get all text from the message-content element, fallback to previous selector
+                let found = false;
+                const messageContent = responseElements[i].querySelector('message-content');
+                if (messageContent && messageContent.innerText.trim()) {
+                    responseText = messageContent.innerText.trim();
+                    found = true;
+                }
+                // Fallback: get all visible text
+                if (!found) {
+                    const allText = responseElements[i].innerText.trim();
+                    if (allText) responseText = allText;
+                }
             }
-        });
+            transcript += `--- RESPONSE ${i + 1} ---\n` + responseText + '\n\n';
+        }
         console.log('content.js: extractTranscript - Finished transcript extraction. Transcript length:', transcript.length);
         return transcript;
     }
@@ -474,3 +492,10 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
         }
     });
 }
+
+// Listen for logToPageConsole messages from popup.js and log to the main page's console
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'logToPageConsole' && request.message) {
+        console.log('[Gemini Extension]', request.message);
+    }
+});

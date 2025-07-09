@@ -1,24 +1,27 @@
 // popup.js
+// Helper function to sanitize a string for use as a filename
+function sanitizeFilename(title) {
+    console.log('popup.js: sanitizeFilename - Sanitizing title:', title);
+    // Replace invalid characters with an underscore
+    return title.replace(/[/\\?%*:|"<>]/g, '_')
+                .replace(/\s+/g, '_') // Replace spaces with underscores
+                .toLowerCase(); // Convert to lowercase for consistency
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
+    // Create debug panel FIRST so it exists for all updates
+    const resultDiv = document.getElementById('result');
+
+    // No initial delay
     console.log('popup.js: DOMContentLoaded - Popup script started.');
+    // Do not call logToPageConsole here; only call after content script is injected
 
     const startAutomationBtn = document.getElementById('startAutomationBtn');
-    const abortSearchBtn = document.getElementById('abortSearchBtn'); // New button
-    const searchStatusDiv = document.getElementById('searchStatus'); // New status div
-    const resultDiv = document.getElementById('result');
+    const abortSearchBtn = document.getElementById('abortSearchBtn');
     const savePrefixInput = document.getElementById('savePrefix');
-    const pauseDurationInput = document.getElementById('pauseDuration');
+    const pauseDurationInput = document.getElementById('pauseDuration'); // Added to fix ReferenceError
 
     let cachedTitlesFromSearchResults = []; // To store titles retrieved from search results for automation
-
-    // Helper function to sanitize a string for use as a filename
-    function sanitizeFilename(title) {
-        console.log('popup.js: sanitizeFilename - Sanitizing title:', title);
-        // Replace invalid characters with an underscore
-        return title.replace(/[/\\?%*:|"<>]/g, '_')
-                    .replace(/\s+/g, '_') // Replace spaces with underscores
-                    .toLowerCase(); // Convert to lowercase for consistency
-    }
 
     // Utility to show/hide and reset abort button state
     function setAbortButtonVisible(visible) {
@@ -44,7 +47,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         resultDiv.className = 'result-box info';
         startAutomationBtn.classList.add('hidden'); // Ensure hidden initially
         setAbortButtonVisible(false); // Hide and reset abort button
-        searchStatusDiv.classList.add('hidden'); // Ensure hidden initially
+
+        // Set default value for savePrefixInput before any search
+        // Compute the prefix from the search string if available in the DOM
+        let searchString = '';
+        const pageText = document.body.innerText;
+        const regex = /results for\s+(?:["“])?(.+?)(?:["”])?(?:$|\s)/i;
+        const match = pageText.match(regex);
+        if (match && match[1]) {
+            searchString = match[1].trim();
+        }
+        console.log('popup.js: Computed searchString:', searchString);
+        // Do NOT call logToPageConsole here; only after content script is injected
+        if (searchString) {
+            savePrefixInput.value = sanitizeFilename(searchString, false) + '/'; // Don't log to page here
+        } else {
+            savePrefixInput.value = '';
+        }
+        console.log('popup.js: savePrefixInput.value after initialization:', savePrefixInput.value);
+        // Do NOT call logToPageConsole here; only after content script is injected
 
         let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         console.log('popup.js: initializePopup - Current tab queried:', tab);
@@ -55,22 +76,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                 console.log('popup.js: initializePopup - Current tab is Gemini search page.');
                 resultDiv.textContent = `Gemini search page detected. Checking content...`;
                 resultDiv.classList.add('info');
-
-                // Show search status and abort button while content script is working
-                searchStatusDiv.classList.remove('hidden');
-                searchStatusDiv.textContent = 'Searching conversation list... (0 titles loaded)';
                 setAbortButtonVisible(true);
 
                 chrome.scripting.executeScript({
                     target: { tabId: tab.id },
                     files: ['content.js']
-                }, () => {
+                }, async () => {
                     if (chrome.runtime.lastError) {
                         console.error('popup.js: initializePopup - Script injection error:', chrome.runtime.lastError);
                         resultDiv.textContent = `Error injecting script: ${chrome.runtime.lastError.message}`;
                         resultDiv.classList.add('failure');
                         savePrefixInput.value = 'gemini_transcripts/'; // Fallback
-                        searchStatusDiv.classList.add('hidden'); // Hide status on error
                         setAbortButtonVisible(false);
                         return;
                     }
@@ -120,7 +136,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         startAutomationBtn.disabled = true; // Disable this button once clicked
         setAbortButtonVisible(false); // Hide abort button during automation
-        searchStatusDiv.classList.add('hidden'); // Hide search status during automation
 
         resultDiv.textContent = 'Starting automation...';
         resultDiv.classList.add('info');
@@ -142,8 +157,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     abortSearchBtn.addEventListener('click', async () => {
         console.log('popup.js: "Abort Search" button clicked.');
         abortSearchBtn.disabled = true; // Disable to prevent multiple clicks
-        searchStatusDiv.textContent = 'Aborting search...';
-        searchStatusDiv.classList.add('info');
+        resultDiv.textContent = 'Aborting search...';
+        resultDiv.classList.add('info');
 
         let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab) {
@@ -157,9 +172,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log('popup.js: Received message from content.js:', request.action, request);
 
         if (request.action === "searchResults") {
-            // Hide search status and abort button after initial search results are processed
-            searchStatusDiv.classList.add('hidden');
+            // Hide abort button after initial search results are processed
             setAbortButtonVisible(false);
+
+            // Clear the search status message when results are in
+            resultDiv.textContent = '';
 
             if (request.found) {
                 console.log('popup.js: searchResults - Pattern found. Search string:', request.searchString);
@@ -196,14 +213,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             startAutomationBtn.classList.add('hidden');
             setAbortButtonVisible(false);
             // Ensure hidden during processing
-            searchStatusDiv.classList.add('hidden'); // Ensure hidden during processing
+            // Remove: searchStatusDiv.classList.add('hidden');
         } else if (request.action === "automationComplete") {
             console.log('popup.js: automationComplete - All conversations processed. Transcripts received:', request.transcripts.length);
             resultDiv.textContent = request.message || 'Automation complete!';
             resultDiv.classList.add('success');
             startAutomationBtn.classList.add('hidden');
             setAbortButtonVisible(false); // Only use the robust utility
-            searchStatusDiv.classList.add('hidden'); // Ensure hidden at completion
 
             if (request.transcripts && request.transcripts.length > 0) {
                 console.log('popup.js: automationComplete - Initiating downloads for', request.transcripts.length, 'transcripts.');
@@ -254,19 +270,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.warn('popup.js: titleNotFoundInList - Warning:', request.title, request.reason);
             resultDiv.textContent = `Warning: Title "${request.title}" not found in conversation list. Reason: ${request.reason || 'Unknown'}. Proceeding to next.`;
             resultDiv.classList.add('failure');
-        } else if (request.action === "searchProgress") { // New message handler for search progress
-            console.log('popup.js: searchProgress - Loaded titles:', request.loadedTitlesCount);
-            searchStatusDiv.textContent = `Searching conversation list... (${request.loadedTitlesCount} titles loaded)`;
-            searchStatusDiv.classList.remove('hidden'); // Ensure visible
-            setAbortButtonVisible(true);
-        } else if (request.action === "searchAborted") { // New message handler for search aborted
-            console.log('popup.js: searchAborted - Search was aborted.');
-            searchStatusDiv.textContent = 'Search aborted by user.';
-            searchStatusDiv.classList.add('failure'); // Indicate failure/aborted state
-            setAbortButtonVisible(false);
-            startAutomationBtn.classList.add('hidden'); // Hide start button
-            resultDiv.textContent = 'Conversation list search was aborted. Please try again or adjust your search.';
+        } else if (request.action === "searchAborted") {
+            resultDiv.textContent = 'Search aborted by user. Conversation list search was aborted. Please try again or adjust your search.';
             resultDiv.classList.add('info');
+            setAbortButtonVisible(false);
+            startAutomationBtn.classList.add('hidden');
         }
     });
+
+    // Remove duplicate debug panel creation at the end
 });
