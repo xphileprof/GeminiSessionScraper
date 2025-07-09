@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gemini Transcript Extractor</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="[https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css](https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css)" rel="stylesheet">
     <style>
         body {
             width: 350px; /* Slightly wider for more content */
@@ -76,6 +76,12 @@
             font-size: 0.9rem;
             box-sizing: border-box; /* Include padding in width */
         }
+        .abort-button {
+            background-color: #EF4444; /* Red */
+        }
+        .abort-button:hover {
+            background-color: #DC2626; /* Darker Red */
+        }
     </style>
 </head>
 <body>
@@ -93,6 +99,7 @@
         </div>
 
         <button id="startAutomationBtn" class="button mt-4 hidden">Extract Transcripts</button>
+        <button id="abortSearchBtn" class="button abort-button mt-2 hidden">Abort Search</button>
 
         <div id="result" class="result-box">
             Loading...
