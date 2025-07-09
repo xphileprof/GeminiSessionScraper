@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const startAutomationBtn = document.getElementById('startAutomationBtn');
     const abortSearchBtn = document.getElementById('abortSearchBtn');
+    const closePopupBtn = document.getElementById('closePopupBtn');
     const savePrefixInput = document.getElementById('savePrefix');
     const pauseDurationInput = document.getElementById('pauseDuration'); // Added to fix ReferenceError
 
@@ -40,6 +41,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
+    // Utility to show/hide close button
+    function setCloseButtonVisible(visible) {
+        if (visible) {
+            closePopupBtn.classList.remove('hidden');
+        } else {
+            closePopupBtn.classList.add('hidden');
+        }
+    }
+
+    // Close button event listener
+    closePopupBtn.addEventListener('click', () => {
+        console.log('popup.js: Close button clicked - closing popup window');
+        window.close();
+    });
+
     // Function to initialize the popup state, including setting the default prefix
     async function initializePopup() {
         console.log('popup.js: initializePopup - Starting initialization.');
@@ -47,6 +63,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         resultDiv.className = 'result-box info';
         startAutomationBtn.classList.add('hidden'); // Ensure hidden initially
         setAbortButtonVisible(false); // Hide and reset abort button
+        setCloseButtonVisible(false); // Hide close button initially
 
         // Set default value for savePrefixInput before any search
         // Compute the prefix from the search string if available in the DOM
@@ -222,49 +239,126 @@ document.addEventListener('DOMContentLoaded', async () => {
             setAbortButtonVisible(false); // Only use the robust utility
 
             if (request.transcripts && request.transcripts.length > 0) {
-                console.log('popup.js: automationComplete - Initiating downloads for', request.transcripts.length, 'transcripts.');
-                resultDiv.textContent += `<br>Initiating downloads for ${request.transcripts.length} transcripts...`;
-                resultDiv.classList.add('info');
-
+                console.log('popup.js: automationComplete - Creating download links for', request.transcripts.length, 'transcripts.');
+                
                 const currentSavePrefix = savePrefixInput.value.trim();
-                const targetSearchURL = 'https://gemini.google.com/search'; // Define target URL here
-
-                request.transcripts.forEach((transcriptData, index) => {
+                
+                // Create a download section in the popup
+                resultDiv.innerHTML = `
+                    <div class="success">🎉 Automation complete! ${request.transcripts.length} transcripts extracted.</div>
+                    <div class="download-section">
+                        <h3>📥 Download Transcripts:</h3>
+                        <button id="downloadAllBtn" class="download-all-btn">📦 Download All Files</button>
+                        <div id="downloadLinks" class="download-links"></div>
+                        <div class="info" style="margin-top: 15px; font-size: 0.9rem;">
+                            💡 Downloads will start automatically. Check your Downloads folder.
+                        </div>
+                    </div>
+                `;
+                
+                // Show close button after completion
+                setCloseButtonVisible(true);
+                
+                const downloadLinksDiv = document.getElementById('downloadLinks');
+                const downloadAllBtn = document.getElementById('downloadAllBtn');
+                
+                // Create individual download links
+                const downloadData = request.transcripts.map((transcriptData, index) => {
                     const filename = currentSavePrefix + sanitizeFilename(transcriptData.title) + '.txt';
                     const blob = new Blob([transcriptData.content], { type: 'text/plain' });
                     const url = URL.createObjectURL(blob);
-
-                    chrome.downloads.download({
-                        url: url,
-                        filename: filename,
-                        saveAs: true
-                    }, (downloadId) => {
-                        if (chrome.runtime.lastError) {
-                            console.error(`popup.js: Download failed for "${transcriptData.title}":`, chrome.runtime.lastError.message);
-                        } else {
-                            console.log(`popup.js: Download started for ${filename}, ID: ${downloadId}`);
-                        }
-                        URL.revokeObjectURL(url);
+                    
+                    // Create download link
+                    const linkDiv = document.createElement('div');
+                    linkDiv.className = 'download-link-item';
+                    
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = filename;
+                    link.textContent = `📄 ${transcriptData.title}`;
+                    link.className = 'download-link';
+                    link.title = `Click to download: ${filename}`;
+                    
+                    linkDiv.appendChild(link);
+                    downloadLinksDiv.appendChild(linkDiv);
+                    
+                    return { url, filename, blob, transcriptData };
+                });
+                
+                // Download all files when button is clicked
+                downloadAllBtn.addEventListener('click', () => {
+                    console.log('popup.js: Download All button clicked - starting downloads');
+                    downloadAllBtn.textContent = '⬇️ Starting Downloads...';
+                    downloadAllBtn.disabled = true;
+                    
+                    let downloadCount = 0;
+                    downloadData.forEach((data, index) => {
+                        // Stagger downloads slightly to avoid overwhelming the browser
+                        setTimeout(() => {
+                            try {
+                                // Use chrome.downloads API for better control
+                                chrome.downloads.download({
+                                    url: data.url,
+                                    filename: data.filename,
+                                    saveAs: false // Don't prompt for each file
+                                }, (downloadId) => {
+                                    downloadCount++;
+                                    if (chrome.runtime.lastError) {
+                                        console.error(`popup.js: Download failed for "${data.transcriptData.title}":`, chrome.runtime.lastError.message);
+                                    } else {
+                                        console.log(`popup.js: Download started for ${data.filename}, ID: ${downloadId}`);
+                                    }
+                                    
+                                    // Clean up URL after download
+                                    URL.revokeObjectURL(data.url);
+                                    
+                                    // Update button when all downloads are initiated
+                                    if (downloadCount === downloadData.length) {
+                                        downloadAllBtn.textContent = '✅ All Downloads Started!';
+                                        downloadAllBtn.className = 'download-all-btn';
+                                        downloadAllBtn.style.backgroundColor = '#059669';
+                                        
+                                        // Add completion message
+                                        const completionMsg = document.createElement('div');
+                                        completionMsg.className = 'success';
+                                        completionMsg.style.marginTop = '10px';
+                                        completionMsg.style.fontSize = '0.9rem';
+                                        completionMsg.innerHTML = '🎉 All downloads initiated! Check your Downloads folder.<br>You can now close this extension.';
+                                        downloadAllBtn.parentNode.appendChild(completionMsg);
+                                    }
+                                });
+                            } catch (error) {
+                                console.error('popup.js: Error initiating download:', error);
+                                // Fallback to regular link click
+                                const tempLink = document.createElement('a');
+                                tempLink.href = data.url;
+                                tempLink.download = data.filename;
+                                tempLink.style.display = 'none';
+                                document.body.appendChild(tempLink);
+                                tempLink.click();
+                                document.body.removeChild(tempLink);
+                                URL.revokeObjectURL(data.url);
+                            }
+                        }, index * 100); // 100ms delay between downloads
                     });
                 });
-
-                // After all downloads are initiated, explicitly navigate the tab back to the search page
-                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                    if (tabs[0] && !tabs[0].url.startsWith(targetSearchURL)) {
-                        console.log('popup.js: automationComplete - Navigating tab back to search page:', targetSearchURL);
-                        chrome.tabs.update(tabs[0].id, { url: targetSearchURL });
-                    } else {
-                        console.log('popup.js: automationComplete - Tab already on search page or no active tab.');
-                    }
-                });
-
-                // Final message after all downloads are initiated
-                resultDiv.innerHTML = `Automation complete! All download prompts initiated. Please check your downloads.<br>You can now click anywhere on the tab to close this popup.`;
-                resultDiv.classList.add('success');
+                
+                // Also trigger automatic download of all files
+                setTimeout(() => {
+                    downloadAllBtn.click();
+                }, 500); // Give UI time to render first
+                
             } else {
                 console.log('popup.js: automationComplete - No transcripts collected for download.');
-                resultDiv.innerHTML = `Automation complete! No transcripts were collected for download.<br>You can now click anywhere on the tab to close this popup.`;
-                resultDiv.classList.add('success');
+                resultDiv.innerHTML = `
+                    <div class="success">✅ Automation complete!</div>
+                    <div class="info">ℹ️ No transcripts were collected for download.</div>
+                    <div class="info" style="margin-top: 10px; font-size: 0.9rem;">
+                        This might happen if no conversations matched your search or if the conversations had no extractable content.
+                    </div>
+                `;
+                // Show close button even when no transcripts
+                setCloseButtonVisible(true);
             }
         } else if (request.action === "titleNotFoundInList") {
             console.warn('popup.js: titleNotFoundInList - Warning:', request.title, request.reason);
@@ -275,6 +369,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             resultDiv.classList.add('info');
             setAbortButtonVisible(false);
             startAutomationBtn.classList.add('hidden');
+            setCloseButtonVisible(true); // Show close button if aborted
         }
     });
 
