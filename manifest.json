@@ -1,4 +1,3 @@
-// manifest.json
 {
   "manifest_version": 3,
   "name": "Gemini Transcript Extractor",
@@ -7,7 +6,7 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "downloads" // Added permission for downloading files
+    "downloads"
   ],
   "action": {
     "default_popup": "popup.html",
