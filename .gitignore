@@ -2,3 +2,18 @@ resultsList.html
 scroll0.html
 scroll1.html
 consoleOutputMain
+consoleOutputPopup
+
+# Documentation files
+*.md
+DOWNLOAD_DEBUGGING.md
+DOWNLOAD_SYSTEM.md
+DOWNLOAD_TROUBLESHOOTING.md
+LOGGING_GUIDE.md
+NEW_DOWNLOAD_ARCHITECTURE.md
+TESTING_INSTRUCTIONS.md
+copilotSession.md
+
+# Test files
+test-popup.html
+test_popup_standalone.html
