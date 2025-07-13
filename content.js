@@ -14,10 +14,65 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
     let collectedTranscripts = []; // Array to store all extracted transcripts
     let globalSavePrefix = ''; // To store the prefix provided by the user
     let pauseDurationMs = 500; // Default pause duration in milliseconds (0.5 seconds)
+    let maxScrollAttempts = 50; // Default max scroll attempts to load full conversation
     let isSearchAborted = false; // Flag to control search abortion
+    let automationRunning = false; // Flag to prevent multiple automation instances
 
     // New variable for artificial delay between scroll attempts for observation
     const scrollObservationDelayMs = 0; // Reduced to 0ms for minimal delay
+
+    /**
+     * Downloads a transcript file immediately
+     * @param {string} title - The conversation title
+     * @param {string} content - The transcript content
+     * @param {string} savePrefix - The file prefix
+     */
+    function downloadTranscriptImmediately(title, content, savePrefix) {
+        console.log('content.js: downloadTranscriptImmediately - Starting immediate download');
+        console.log('content.js: Title:', title);
+        console.log('content.js: Content length:', content.length);
+        console.log('content.js: Save prefix:', savePrefix);
+        
+        try {
+            // Sanitize filename
+            function sanitizeFilename(title) {
+                return title.replace(/[/\\?%*:|"<>]/g, '_')
+                           .replace(/\s+/g, '_')
+                           .toLowerCase();
+            }
+            
+            const filename = savePrefix + sanitizeFilename(title) + '.txt';
+            console.log('content.js: Sanitized filename:', filename);
+            
+            // Create blob and download
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            
+            // Create and click download link
+            const downloadLink = document.createElement('a');
+            downloadLink.href = url;
+            downloadLink.download = filename;
+            downloadLink.style.display = 'none';
+            
+            console.log('content.js: Adding download link to DOM and clicking...');
+            document.body.appendChild(downloadLink);
+            downloadLink.click();
+            document.body.removeChild(downloadLink);
+            
+            console.log('content.js: ✅ Download initiated for:', filename);
+            
+            // Clean up blob URL after a delay
+            setTimeout(() => {
+                URL.revokeObjectURL(url);
+                console.log('content.js: Blob URL cleaned up for:', filename);
+            }, 1000);
+            
+            return true;
+        } catch (error) {
+            console.error('content.js: ❌ Error downloading transcript:', error);
+            return false;
+        }
+    }
 
     /**
      * Extracts the text content of prompt-response pairs from the current conversation page.
@@ -41,11 +96,23 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
             'working on it',
             'one moment',
             'you stopped this response',
+            'preparing response',
+            'analyzing',
+            'computing',
             '...',
-            'wait'
+            'wait',
+            'gemini is thinking',
+            'response in progress',
+            'working',
+            'busy'
         ];
         
         const cleanText = text.trim().toLowerCase();
+        
+        // Very short responses are likely incomplete or placeholders
+        if (cleanText.length < 5) {
+            return true;
+        }
         
         // Check if the text is just "Show thinking" or starts with it and has minimal additional content
         if (cleanText.startsWith('show thinking')) {
@@ -61,10 +128,27 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
             return true;
         }
         
-        return placeholderIndicators.some(indicator => 
+        // Check if it's mostly dots or whitespace (loading indicators)
+        if (/^[\s\.]+$/.test(cleanText)) {
+            return true;
+        }
+        
+        // Check for common loading/placeholder patterns
+        const isPlaceholder = placeholderIndicators.some(indicator => 
             cleanText === indicator.toLowerCase() || 
-            cleanText.startsWith(indicator.toLowerCase())
-        ) || cleanText.length < 10; // Very short responses are likely placeholders
+            cleanText.startsWith(indicator.toLowerCase()) ||
+            cleanText.includes(indicator.toLowerCase() + '...')
+        );
+        
+        // Additional check: If the text is very short and contains only common placeholder words
+        if (cleanText.length < 20) {
+            const commonPlaceholderWords = ['loading', 'wait', 'thinking', 'generating', 'processing'];
+            if (commonPlaceholderWords.some(word => cleanText.includes(word))) {
+                return true;
+            }
+        }
+        
+        return isPlaceholder;
     }
 
     /**
@@ -193,12 +277,28 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
      * Waits for response elements to contain actual content instead of placeholder text
      */
     async function waitForResponseContent(responseElements, maxWaitMs = 5000) {
-        console.log('content.js: waitForResponseContent - Waiting for actual response content to load...');
+        console.log('content.js: waitForResponseContent - Starting wait for response content');
+        console.log('content.js: waitForResponseContent - Response elements to check:', responseElements.length);
+        console.log('content.js: waitForResponseContent - Max wait time:', maxWaitMs, 'ms');
+        
+        // If no response elements, consider it successful
+        if (!responseElements || responseElements.length === 0) {
+            console.log('content.js: waitForResponseContent - No response elements to check, returning true');
+            return true;
+        }
+        
         const startTime = Date.now();
         const checkInterval = 500; // Check every 500ms
+        let checkCount = 0;
         
         while (Date.now() - startTime < maxWaitMs) {
+            checkCount++;
             let hasValidResponses = true;
+            let placeholderCount = 0;
+            let loadingCount = 0;
+            let validCount = 0;
+            
+            console.log(`content.js: waitForResponseContent - Check #${checkCount} (${Date.now() - startTime}ms elapsed)`);
             
             for (let i = 0; i < responseElements.length; i++) {
                 const element = responseElements[i];
@@ -212,15 +312,32 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
                     responseText = element.innerText.trim();
                 }
                 
-                if (isPlaceholderResponse(responseText)) {
-                    console.log(`content.js: waitForResponseContent - Response ${i + 1} still shows placeholder: "${responseText}"`);
+                console.log(`content.js: waitForResponseContent - Response ${i + 1} text preview: "${responseText.substring(0, 100)}..."`);
+                
+                if (!responseText || responseText.length < 10) {
+                    console.log(`content.js: waitForResponseContent - Response ${i + 1} has minimal content (${responseText.length} chars)`);
+                    loadingCount++;
                     hasValidResponses = false;
-                    break;
+                } else if (isPlaceholderResponse(responseText)) {
+                    console.log(`content.js: waitForResponseContent - Response ${i + 1} still shows placeholder: "${responseText}"`);
+                    placeholderCount++;
+                    hasValidResponses = false;
+                } else {
+                    console.log(`content.js: waitForResponseContent - Response ${i + 1} appears valid (${responseText.length} chars)`);
+                    validCount++;
                 }
             }
             
+            console.log(`content.js: waitForResponseContent - Check results: ${validCount} valid, ${placeholderCount} placeholder, ${loadingCount} loading`);
+            
             if (hasValidResponses && responseElements.length > 0) {
                 console.log('content.js: waitForResponseContent - All responses appear to have valid content');
+                return true;
+            }
+            
+            // If we have some valid responses and some still loading, that's often OK for extraction
+            if (validCount > 0 && (placeholderCount + loadingCount) <= 2) {
+                console.log('content.js: waitForResponseContent - Most responses are valid, proceeding with extraction');
                 return true;
             }
             
@@ -229,6 +346,17 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
         }
         
         console.warn('content.js: waitForResponseContent - Timeout waiting for response content');
+        console.warn('content.js: waitForResponseContent - Final state after timeout:');
+        console.warn('content.js: waitForResponseContent - - Total response elements:', responseElements.length);
+        
+        // Log final state of each response for debugging
+        for (let i = 0; i < Math.min(responseElements.length, 5); i++) {
+            const element = responseElements[i];
+            const messageContent = element.querySelector('message-content');
+            const responseText = messageContent ? messageContent.innerText.trim() : element.innerText.trim();
+            console.warn(`content.js: waitForResponseContent - Response ${i + 1} final state: "${responseText.substring(0, 200)}..."`);
+        }
+        
         return false;
     }
 
@@ -246,156 +374,250 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
         console.log('content.js: extractTranscript - .model-response elements:', document.querySelectorAll('.model-response').length);
         console.log('content.js: extractTranscript - .message-content elements:', document.querySelectorAll('.message-content').length);
         
-        // Select all user-query elements (prompts)
-        const promptElements = document.querySelectorAll('user-query');
-        // Select all model-response elements (responses)
-        const responseElements = document.querySelectorAll('model-response');
-
-        const maxPairs = Math.max(promptElements.length, responseElements.length);
-        console.log('content.js: extractTranscript - Found prompt elements:', promptElements.length);
-        console.log('content.js: extractTranscript - Found response elements:', responseElements.length);
-        console.log('content.js: extractTranscript - Max pairs to process:', maxPairs);
+        // Strategy 1: Try to find conversation elements in DOM order
+        const conversationContainer = document.querySelector('main') || 
+                                    document.querySelector('[role="main"]') ||
+                                    document.querySelector('.conversation-container') ||
+                                    document.querySelector('.chat-container') ||
+                                    document.body;
         
-        if (maxPairs === 0) {
-            console.warn('content.js: extractTranscript - No user-query or model-response elements found on page.');
-            // Try alternative selectors
-            console.log('content.js: extractTranscript - Trying alternative selectors...');
+        // Get all conversation elements (both prompts and responses) in DOM order
+        const allConversationElements = conversationContainer.querySelectorAll([
+            'user-query',
+            'model-response',
+            '[data-test-id="user-message"]',
+            '[data-test-id="assistant-message"]',
+            '.user-message',
+            '.assistant-message',
+            '[role="user"]',
+            '[role="assistant"]'
+        ].join(', '));
+        
+        console.log('content.js: extractTranscript - Found conversation elements in DOM order:', allConversationElements.length);
+        
+        if (allConversationElements.length > 0) {
+            console.log('content.js: extractTranscript - Processing elements in DOM order');
             
-            // Try more comprehensive selectors for current Gemini
-            const altPrompts = document.querySelectorAll([
-                '[data-test-id="user-message"]',
-                '.user-message', 
-                '[role="user"]',
-                '.request-content',
-                '.human-message',
-                '.user-query',
-                '.prompt-content',
-                'user-query'
-            ].join(', '));
+            let promptCounter = 0;
+            let responseCounter = 0;
             
-            const altResponses = document.querySelectorAll([
-                '[data-test-id="assistant-message"]',
-                '.assistant-message',
-                '[role="assistant"]', 
-                '.response-content',
-                '.ai-message',
-                '.model-response',
-                '.gemini-response',
-                'model-response'
-            ].join(', '));
-            
-            console.log('content.js: extractTranscript - Alternative prompts found:', altPrompts.length);
-            console.log('content.js: extractTranscript - Alternative responses found:', altResponses.length);
-            
-            // If we found alternative elements, use them
-            if (altPrompts.length > 0 || altResponses.length > 0) {
-                console.log('content.js: extractTranscript - Using alternative selectors for extraction');
-                const maxAltPairs = Math.max(altPrompts.length, altResponses.length);
+            allConversationElements.forEach((element, index) => {
+                const tagName = element.tagName.toLowerCase();
+                const role = element.getAttribute('role');
+                const testId = element.getAttribute('data-test-id');
+                const className = element.className || '';
                 
-                for (let i = 0; i < maxAltPairs; i++) {
-                    // PROMPT
+                console.log(`content.js: extractTranscript - Processing element ${index + 1}: ${tagName}, role=${role}, testId=${testId}, class=${className}`);
+                
+                // Determine if this is a prompt or response
+                const isPrompt = tagName === 'user-query' || 
+                               role === 'user' ||
+                               testId === 'user-message' ||
+                               className.includes('user-message');
+                
+                const isResponse = tagName === 'model-response' ||
+                                 role === 'assistant' ||
+                                 testId === 'assistant-message' ||
+                                 className.includes('assistant-message');
+                
+                if (isPrompt) {
+                    promptCounter++;
                     let promptText = '[Prompt not found]';
-                    if (altPrompts[i]) {
-                        const allText = altPrompts[i].innerText.trim();
+                    
+                    // Try multiple extraction methods for prompts
+                    const p = element.querySelector('.user-query-bubble-with-background .query-text p');
+                    if (p && p.innerText.trim()) {
+                        promptText = p.innerText.trim();
+                        console.log(`content.js: extractTranscript - Found prompt via p tag: "${promptText.substring(0, 100)}..."`);
+                    } else {
+                        const allText = element.innerText.trim();
                         if (allText) {
                             promptText = allText;
-                            console.log(`content.js: extractTranscript - Found alt prompt ${i + 1}: "${promptText.substring(0, 100)}..."`);
+                            console.log(`content.js: extractTranscript - Found prompt via innerText: "${promptText.substring(0, 100)}..."`);
                         }
+                    }
+                    
+                    transcript += `--- PROMPT ${promptCounter} ---\n${promptText}\n\n`;
+                    
+                } else if (isResponse) {
+                    responseCounter++;
+                    let responseText = '[Response not found]';
+                    
+                    // Use extractActualResponse to properly handle "Show thinking" and get only the final response
+                    const extractedText = extractActualResponse(element);
+                    if (extractedText && !isPlaceholderResponse(extractedText)) {
+                        responseText = extractedText;
+                        console.log(`content.js: extractTranscript - Successfully extracted actual response: "${responseText.substring(0, 100)}..."`);
+                    } else if (extractedText) {
+                        console.log(`content.js: extractTranscript - Extracted text is still a placeholder: "${extractedText}"`);
+                        responseText = '[Response still loading - contains placeholder text]';
+                    }
+                    
+                    transcript += `--- RESPONSE ${responseCounter} ---\n${responseText}\n\n`;
+                } else {
+                    console.log(`content.js: extractTranscript - Skipping unrecognized element: ${tagName}`);
+                }
+            });
+            
+            console.log(`content.js: extractTranscript - Processed ${promptCounter} prompts and ${responseCounter} responses in DOM order`);
+            
+        } else {
+            // Fallback to original pairing strategy
+            console.log('content.js: extractTranscript - No elements found in DOM order, falling back to original strategy');
+            
+            // Select all user-query elements (prompts)
+            const promptElements = document.querySelectorAll('user-query');
+            // Select all model-response elements (responses)
+            const responseElements = document.querySelectorAll('model-response');
+
+            const maxPairs = Math.max(promptElements.length, responseElements.length);
+            console.log('content.js: extractTranscript - Found prompt elements:', promptElements.length);
+            console.log('content.js: extractTranscript - Found response elements:', responseElements.length);
+            console.log('content.js: extractTranscript - Max pairs to process:', maxPairs);
+            
+            if (maxPairs === 0) {
+                console.warn('content.js: extractTranscript - No user-query or model-response elements found on page.');
+                // Try alternative selectors
+                console.log('content.js: extractTranscript - Trying alternative selectors...');
+                
+                // Try more comprehensive selectors for current Gemini
+                const altPrompts = document.querySelectorAll([
+                    '[data-test-id="user-message"]',
+                    '.user-message', 
+                    '[role="user"]',
+                    '.request-content',
+                    '.human-message',
+                    '.user-query',
+                    '.prompt-content',
+                    'user-query'
+                ].join(', '));
+                
+                const altResponses = document.querySelectorAll([
+                    '[data-test-id="assistant-message"]',
+                    '.assistant-message',
+                    '[role="assistant"]', 
+                    '.response-content',
+                    '.ai-message',
+                    '.model-response',
+                    '.gemini-response',
+                    'model-response'
+                ].join(', '));
+                
+                console.log('content.js: extractTranscript - Alternative prompts found:', altPrompts.length);
+                console.log('content.js: extractTranscript - Alternative responses found:', altResponses.length);
+                
+                // If we found alternative elements, use them
+                if (altPrompts.length > 0 || altResponses.length > 0) {
+                    console.log('content.js: extractTranscript - Using alternative selectors for extraction');
+                    const maxAltPairs = Math.max(altPrompts.length, altResponses.length);
+                    
+                    for (let i = 0; i < maxAltPairs; i++) {
+                        // PROMPT
+                        let promptText = '[Prompt not found]';
+                        if (altPrompts[i]) {
+                            const allText = altPrompts[i].innerText.trim();
+                            if (allText) {
+                                promptText = allText;
+                                console.log(`content.js: extractTranscript - Found alt prompt ${i + 1}: "${promptText.substring(0, 100)}..."`);
+                            }
+                        }
+                        transcript += `--- PROMPT ${i + 1} ---\n` + promptText + '\n\n';
+
+                        // RESPONSE
+                        let responseText = '[Response not found]';
+                        if (altResponses[i]) {
+                            // Use extractActualResponse to properly handle "Show thinking" and get only the final response
+                            const extractedText = extractActualResponse(altResponses[i]);
+                            if (extractedText && !isPlaceholderResponse(extractedText)) {
+                                responseText = extractedText;
+                                console.log(`content.js: extractTranscript - Found valid alt response ${i + 1}: "${responseText.substring(0, 100)}..."`);
+                            } else if (extractedText) {
+                                console.log(`content.js: extractTranscript - Skipping placeholder alt response ${i + 1}: "${extractedText}"`);
+                                responseText = '[Response still loading - contains placeholder text]';
+                            }
+                        }
+                        transcript += `--- RESPONSE ${i + 1} ---\n` + responseText + '\n\n';
+                    }
+                } else {
+                    // Log some sample HTML to understand the structure
+                    const bodyHTML = document.body.innerHTML;
+                    console.log('content.js: extractTranscript - Body HTML sample (first 1000 chars):', bodyHTML.substring(0, 1000));
+                    
+                    // Try to find any div with text content that might be conversation
+                    const allDivs = document.querySelectorAll('div');
+                    console.log('content.js: extractTranscript - Total divs found:', allDivs.length);
+                    
+                    let textDivs = 0;
+                    for (let div of allDivs) {
+                        if (div.innerText && div.innerText.trim().length > 50) {
+                            textDivs++;
+                            if (textDivs <= 5) { // Log first 5 text-containing divs
+                                console.log(`content.js: extractTranscript - Text div ${textDivs}:`, div.innerText.substring(0, 100));
+                            }
+                        }
+                    }
+                    console.log('content.js: extractTranscript - Divs with substantial text:', textDivs);
+                }
+            } else {
+                // Original pairing logic for fallback
+                for (let i = 0; i < maxPairs; i++) {
+                    console.log(`content.js: extractTranscript - Processing pair ${i + 1}/${maxPairs}`);
+                    
+                    // PROMPT
+                    let promptText = '[Prompt not found]';
+                    if (promptElements[i]) {
+                        console.log(`content.js: extractTranscript - Processing prompt ${i + 1}, element:`, promptElements[i]);
+                        console.log(`content.js: extractTranscript - Prompt element HTML:`, promptElements[i].outerHTML.substring(0, 500));
+                        
+                        // Try to get all text from the prompt element, fallback to previous selector
+                        let found = false;
+                        // Try the p tag
+                        const p = promptElements[i].querySelector('.user-query-bubble-with-background .query-text p');
+                        if (p && p.innerText.trim()) {
+                            promptText = p.innerText.trim();
+                            found = true;
+                            console.log(`content.js: extractTranscript - Found prompt via p tag: "${promptText.substring(0, 100)}..."`);
+                        }
+                        // Fallback: get all visible text
+                        if (!found) {
+                            const allText = promptElements[i].innerText.trim();
+                            if (allText) {
+                                promptText = allText;
+                                console.log(`content.js: extractTranscript - Found prompt via innerText: "${promptText.substring(0, 100)}..."`);
+                            } else {
+                                console.log(`content.js: extractTranscript - No text found in prompt element ${i + 1}`);
+                            }
+                        }
+                    } else {
+                        console.log(`content.js: extractTranscript - No prompt element at index ${i}`);
                     }
                     transcript += `--- PROMPT ${i + 1} ---\n` + promptText + '\n\n';
 
                     // RESPONSE
                     let responseText = '[Response not found]';
-                    if (altResponses[i]) {
+                    if (responseElements[i]) {
+                        console.log(`content.js: extractTranscript - Processing response ${i + 1}, element:`, responseElements[i]);
+                        console.log(`content.js: extractTranscript - Response element HTML:`, responseElements[i].outerHTML.substring(0, 500));
+                        
                         // Use extractActualResponse to properly handle "Show thinking" and get only the final response
-                        const extractedText = extractActualResponse(altResponses[i]);
+                        const extractedText = extractActualResponse(responseElements[i]);
                         if (extractedText && !isPlaceholderResponse(extractedText)) {
                             responseText = extractedText;
-                            console.log(`content.js: extractTranscript - Found valid alt response ${i + 1}: "${responseText.substring(0, 100)}..."`);
+                            console.log(`content.js: extractTranscript - Successfully extracted actual response: "${responseText.substring(0, 100)}..."`);
                         } else if (extractedText) {
-                            console.log(`content.js: extractTranscript - Skipping placeholder alt response ${i + 1}: "${extractedText}"`);
+                            console.log(`content.js: extractTranscript - Extracted text is still a placeholder: "${extractedText}"`);
                             responseText = '[Response still loading - contains placeholder text]';
+                        } else {
+                            console.log(`content.js: extractTranscript - No text extracted from response element ${i + 1}`);
                         }
+                    } else {
+                        console.log(`content.js: extractTranscript - No response element at index ${i}`);
                     }
                     transcript += `--- RESPONSE ${i + 1} ---\n` + responseText + '\n\n';
                 }
-            } else {
-                // Log some sample HTML to understand the structure
-                const bodyHTML = document.body.innerHTML;
-                console.log('content.js: extractTranscript - Body HTML sample (first 1000 chars):', bodyHTML.substring(0, 1000));
-                
-                // Try to find any div with text content that might be conversation
-                const allDivs = document.querySelectorAll('div');
-                console.log('content.js: extractTranscript - Total divs found:', allDivs.length);
-                
-                let textDivs = 0;
-                for (let div of allDivs) {
-                    if (div.innerText && div.innerText.trim().length > 50) {
-                        textDivs++;
-                        if (textDivs <= 5) { // Log first 5 text-containing divs
-                            console.log(`content.js: extractTranscript - Text div ${textDivs}:`, div.innerText.substring(0, 100));
-                        }
-                    }
-                }
-                console.log('content.js: extractTranscript - Divs with substantial text:', textDivs);
             }
         }
-
-        for (let i = 0; i < maxPairs; i++) {
-            console.log(`content.js: extractTranscript - Processing pair ${i + 1}/${maxPairs}`);
-            
-            // PROMPT
-            let promptText = '[Prompt not found]';
-            if (promptElements[i]) {
-                console.log(`content.js: extractTranscript - Processing prompt ${i + 1}, element:`, promptElements[i]);
-                console.log(`content.js: extractTranscript - Prompt element HTML:`, promptElements[i].outerHTML.substring(0, 500));
-                
-                // Try to get all text from the prompt element, fallback to previous selector
-                let found = false;
-                // Try the p tag
-                const p = promptElements[i].querySelector('.user-query-bubble-with-background .query-text p');
-                if (p && p.innerText.trim()) {
-                    promptText = p.innerText.trim();
-                    found = true;
-                    console.log(`content.js: extractTranscript - Found prompt via p tag: "${promptText.substring(0, 100)}..."`);
-                }
-                // Fallback: get all visible text
-                if (!found) {
-                    const allText = promptElements[i].innerText.trim();
-                    if (allText) {
-                        promptText = allText;
-                        console.log(`content.js: extractTranscript - Found prompt via innerText: "${promptText.substring(0, 100)}..."`);
-                    } else {
-                        console.log(`content.js: extractTranscript - No text found in prompt element ${i + 1}`);
-                    }
-                }
-            } else {
-                console.log(`content.js: extractTranscript - No prompt element at index ${i}`);
-            }
-            transcript += `--- PROMPT ${i + 1} ---\n` + promptText + '\n\n';
-
-            // RESPONSE
-            let responseText = '[Response not found]';
-            if (responseElements[i]) {
-                console.log(`content.js: extractTranscript - Processing response ${i + 1}, element:`, responseElements[i]);
-                console.log(`content.js: extractTranscript - Response element HTML:`, responseElements[i].outerHTML.substring(0, 500));
-                
-                // Use extractActualResponse to properly handle "Show thinking" and get only the final response
-                const extractedText = extractActualResponse(responseElements[i]);
-                if (extractedText && !isPlaceholderResponse(extractedText)) {
-                    responseText = extractedText;
-                    console.log(`content.js: extractTranscript - Successfully extracted actual response: "${responseText.substring(0, 100)}..."`);
-                } else if (extractedText) {
-                    console.log(`content.js: extractTranscript - Extracted text is still a placeholder: "${extractedText}"`);
-                    responseText = '[Response still loading - contains placeholder text]';
-                } else {
-                    console.log(`content.js: extractTranscript - No text extracted from response element ${i + 1}`);
-                }
-            } else {
-                console.log(`content.js: extractTranscript - No response element at index ${i}`);
-            }
-            transcript += `--- RESPONSE ${i + 1} ---\n` + responseText + '\n\n';
-        }
+        
         console.log('content.js: extractTranscript - Finished transcript extraction. Transcript length:', transcript.length);
         return transcript;
     }
@@ -647,19 +869,517 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
      * It finds the corresponding element, clicks it, extracts transcript, and then navigates back.
      * This function is now fully automated and does not wait for user input between steps.
      */
+    /**
+     * Extracts a single transcript by title and downloads it immediately
+     * @param {string} targetTitle - The title of the conversation to extract
+     * @param {number} currentIndex - Current extraction index (0-based)
+     * @param {number} totalCount - Total number of transcripts to extract
+     */
+    async function extractSingleTranscriptByTitle(targetTitle, currentIndex, totalCount) {
+        console.log(`content.js: extractSingleTranscriptByTitle - Starting extraction for: "${targetTitle}"`);
+        console.log(`content.js: Progress: ${currentIndex + 1}/${totalCount}`);
+        
+        try {
+            // Send processing message to popup (if it's still open)
+            try {
+                chrome.runtime.sendMessage({
+                    action: "processingTitle",
+                    title: targetTitle,
+                    current: currentIndex + 1,
+                    total: totalCount
+                });
+            } catch (error) {
+                console.log('content.js: extractSingleTranscriptByTitle - Popup appears to be closed, continuing automation...');
+            }
+            
+            // Find and click the conversation
+            console.log('content.js: extractSingleTranscriptByTitle - Looking for conversation elements...');
+            
+            // Use more specific selectors that exclude avatar/account buttons
+            const conversationElements = document.querySelectorAll(`
+                [data-test-id="conversation"], 
+                .conversation-title, 
+                a[href*="/app/"]:not([href*="SignOutOptions"]):not([href*="accounts.google.com"]):not(.gb_B):not(.gb_Za), 
+                a[href*="/chat/"]:not([href*="SignOutOptions"]):not([href*="accounts.google.com"]):not(.gb_B):not(.gb_Za)
+            `.replace(/\s+/g, ' ').trim());
+            console.log('content.js: extractSingleTranscriptByTitle - Found conversation elements:', conversationElements.length);
+            
+            // Debug: Log the first few elements to see what we're working with
+            for (let i = 0; i < Math.min(5, conversationElements.length); i++) {
+                const element = conversationElements[i];
+                console.log(`content.js: extractSingleTranscriptByTitle - Element ${i}:`, {
+                    tagName: element.tagName,
+                    className: element.className,
+                    textContent: element.textContent?.trim().substring(0, 100),
+                    href: element.href
+                });
+            }
+            
+            let foundElement = null;
+            for (const element of conversationElements) {
+                const elementText = element.innerText?.trim().replace(/\u00A0/g, '') || '';
+                const cleanedElementText = elementText.toLowerCase().replace(/[^\w\s]/g, '').trim();
+                const cleanedTargetTitle = targetTitle.toLowerCase().replace(/[^\w\s]/g, '').trim();
+                
+                console.log(`content.js: extractSingleTranscriptByTitle - Checking: "${cleanedElementText.substring(0, 50)}..." vs "${cleanedTargetTitle}"`);
+                
+                // Try multiple matching strategies
+                const exactMatch = cleanedElementText === cleanedTargetTitle;
+                const containsMatch = cleanedElementText.includes(cleanedTargetTitle);
+                const reverseContainsMatch = cleanedTargetTitle.includes(cleanedElementText);
+                const wordsMatch = cleanedTargetTitle.split(' ').every(word => cleanedElementText.includes(word));
+                
+                if (exactMatch || containsMatch || reverseContainsMatch || wordsMatch) {
+                    // Safety check: make sure this looks like a conversation element
+                    const elementClasses = element.className?.toLowerCase() || '';
+                    const elementId = element.id?.toLowerCase() || '';
+                    const href = element.href || '';
+                    
+                    const isUnsafeElement = 
+                        elementClasses.includes('avatar') ||
+                        elementClasses.includes('profile') ||
+                        elementClasses.includes('menu') ||
+                        elementClasses.includes('dropdown') ||
+                        elementClasses.includes('header') ||
+                        elementClasses.includes('gb_') ||
+                        href.includes('SignOutOptions') ||
+                        href.includes('accounts.google.com') ||
+                        elementId.includes('avatar') ||
+                        elementId.includes('profile');
+                    
+                    const isConversationElement = 
+                        href.includes('/app/') ||
+                        href.includes('/chat/') ||
+                        elementClasses.includes('conversation') ||
+                        element.hasAttribute('data-test-id');
+                    
+                    if (isUnsafeElement) {
+                        console.warn('content.js: extractSingleTranscriptByTitle - Skipping unsafe element:', {
+                            text: elementText.substring(0, 50),
+                            className: elementClasses,
+                            id: elementId
+                        });
+                        continue;
+                    }
+                    
+                    foundElement = element;
+                    console.log('content.js: extractSingleTranscriptByTitle - Found matching element using strategy:', {
+                        exactMatch, containsMatch, reverseContainsMatch, wordsMatch,
+                        isConversationElement,
+                        href: href
+                    });
+                    break;
+                }
+            }
+            
+            if (!foundElement) {
+                console.warn('content.js: extractSingleTranscriptByTitle - First selector failed, trying broader selectors...');
+                
+                // Try broader selectors
+                const allLinks = document.querySelectorAll('a');
+                const allClickableElements = document.querySelectorAll('div[role="button"], button, [onclick]');
+                const combinedElements = [...allLinks, ...allClickableElements];
+                
+                console.log('content.js: extractSingleTranscriptByTitle - Trying broader search with', combinedElements.length, 'elements');
+                
+                for (const element of combinedElements) {
+                    const elementText = element.innerText?.trim().replace(/\u00A0/g, '') || '';
+                    const cleanedElementText = elementText.toLowerCase().replace(/[^\w\s]/g, '').trim();
+                    const cleanedTargetTitle = targetTitle.toLowerCase().replace(/[^\w\s]/g, '').trim();
+                    
+                    // Only check elements that have meaningful text content
+                    if (elementText.length > 10 && elementText.length < 200) {
+                        const wordsMatch = cleanedTargetTitle.split(' ').every(word => 
+                            word.length > 2 && cleanedElementText.includes(word)
+                        );
+                        
+                        if (wordsMatch) {
+                            foundElement = element;
+                            console.log('content.js: extractSingleTranscriptByTitle - Found matching element with broader search:', elementText.substring(0, 100));
+                            
+                            // Safety check: make sure we're not clicking on user avatar or menu elements
+                            const elementClasses = element.className?.toLowerCase() || '';
+                            const elementId = element.id?.toLowerCase() || '';
+                            const parentClasses = element.parentElement?.className?.toLowerCase() || '';
+                            
+                            const isUnsafeElement = 
+                                elementClasses.includes('avatar') ||
+                                elementClasses.includes('profile') ||
+                                elementClasses.includes('menu') ||
+                                elementClasses.includes('dropdown') ||
+                                elementId.includes('avatar') ||
+                                elementId.includes('profile') ||
+                                parentClasses.includes('avatar') ||
+                                parentClasses.includes('profile');
+                            
+                            if (isUnsafeElement) {
+                                console.warn('content.js: extractSingleTranscriptByTitle - Skipping unsafe element (avatar/menu):', {
+                                    className: elementClasses,
+                                    id: elementId,
+                                    parentClassName: parentClasses
+                                });
+                                foundElement = null;
+                                continue;
+                            }
+                            
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (!foundElement) {
+                console.error('content.js: extractSingleTranscriptByTitle - Could not find conversation element for:', targetTitle);
+                try {
+                    chrome.runtime.sendMessage({
+                        action: "singleTranscriptComplete",
+                        title: targetTitle,
+                        downloadSuccess: false,
+                        error: "Conversation not found in list"
+                    });
+                } catch (error) {
+                    console.log('content.js: extractSingleTranscriptByTitle - Could not send error message to popup (popup may be closed)');
+                }
+                return;
+            }
+            
+            // Final safety check before clicking
+            const finalSafetyCheck = () => {
+                const classes = foundElement.className?.toLowerCase() || '';
+                const id = foundElement.id?.toLowerCase() || '';
+                const href = foundElement.href || '';
+                const text = foundElement.textContent?.trim() || '';
+                
+                // Red flags that suggest this is NOT a conversation element
+                const redFlags = [
+                    classes.includes('avatar'),
+                    classes.includes('profile'),
+                    classes.includes('menu'),
+                    classes.includes('dropdown'),
+                    id.includes('avatar'),
+                    id.includes('profile'),
+                    text.length < 5,
+                    text.toLowerCase().includes('sign out'),
+                    text.toLowerCase().includes('account'),
+                    text.toLowerCase().includes('settings')
+                ];
+                
+                const hasRedFlags = redFlags.some(flag => flag);
+                
+                // Green flags that suggest this IS a conversation element
+                const greenFlags = [
+                    href.includes('/app/'),
+                    href.includes('/chat/'),
+                    classes.includes('conversation'),
+                    foundElement.hasAttribute('data-test-id'),
+                    text.length > 20 && text.length < 200
+                ];
+                
+                const hasGreenFlags = greenFlags.some(flag => flag);
+                
+                console.log('content.js: extractSingleTranscriptByTitle - Final safety check:', {
+                    redFlags: redFlags.filter(flag => flag).length,
+                    greenFlags: greenFlags.filter(flag => flag).length,
+                    hasRedFlags,
+                    hasGreenFlags,
+                    element: {
+                        tagName: foundElement.tagName,
+                        className: classes,
+                        id: id,
+                        href: href,
+                        text: text.substring(0, 50)
+                    }
+                });
+                
+                // Relaxed safety check: Allow clicking if green flags are present, even if red flags exist
+                // Only block if there are red flags but NO green flags, or if there are critical red flags
+                const criticalRedFlags = [
+                    text.toLowerCase().includes('sign out'),
+                    text.toLowerCase().includes('account'),
+                    text.toLowerCase().includes('settings'),
+                    classes.includes('gb_'), // Google bar elements are always critical
+                    href.includes('SignOutOptions'),
+                    href.includes('accounts.google.com'),
+                    classes.includes('menu') && !href.includes('/app/'),
+                    classes.includes('dropdown') && !href.includes('/app/')
+                ];
+                
+                const hasCriticalRedFlags = criticalRedFlags.some(flag => flag);
+                
+                console.log('content.js: extractSingleTranscriptByTitle - Relaxed safety check details:', {
+                    criticalRedFlags: criticalRedFlags.filter(flag => flag).length,
+                    hasCriticalRedFlags,
+                    decision: !hasCriticalRedFlags && (hasGreenFlags || !hasRedFlags)
+                });
+                
+                // Block if there are critical red flags (these are always bad)
+                // Otherwise, allow if we have green flags, or if no red flags at all
+                return !hasCriticalRedFlags && (hasGreenFlags || !hasRedFlags);
+            };
+            
+            if (!finalSafetyCheck()) {
+                console.error('content.js: extractSingleTranscriptByTitle - Element failed relaxed safety check - aborting click');
+                try {
+                    chrome.runtime.sendMessage({
+                        action: "singleTranscriptComplete",
+                        title: targetTitle,
+                        downloadSuccess: false,
+                        error: "Found element failed relaxed safety check - has critical red flags without green flags"
+                    });
+                } catch (error) {
+                    console.log('content.js: extractSingleTranscriptByTitle - Could not send safety check error to popup (popup may be closed)');
+                }
+                return;
+            }
+            
+            // Click the conversation
+            console.log('content.js: extractSingleTranscriptByTitle - About to click conversation element');
+            console.log('content.js: extractSingleTranscriptByTitle - Element details:', {
+                tagName: foundElement.tagName,
+                className: foundElement.className,
+                id: foundElement.id,
+                href: foundElement.href,
+                innerHTML: foundElement.innerHTML?.substring(0, 200),
+                textContent: foundElement.textContent?.substring(0, 100),
+                offsetTop: foundElement.offsetTop,
+                offsetLeft: foundElement.offsetLeft,
+                clientWidth: foundElement.clientWidth,
+                clientHeight: foundElement.clientHeight
+            });
+            
+            // Check if the element is actually visible and clickable
+            const rect = foundElement.getBoundingClientRect();
+            console.log('content.js: extractSingleTranscriptByTitle - Element position:', {
+                top: rect.top,
+                left: rect.left,
+                width: rect.width,
+                height: rect.height,
+                visible: rect.width > 0 && rect.height > 0,
+                inViewport: rect.top >= 0 && rect.left >= 0 && rect.top < window.innerHeight && rect.left < window.innerWidth
+            });
+            
+            // Scroll the element into view first
+            console.log('content.js: extractSingleTranscriptByTitle - Scrolling element into view...');
+            foundElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            
+            // Wait a moment for scroll to complete
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            // Try different click methods to avoid misdirection
+            console.log('content.js: extractSingleTranscriptByTitle - Attempting click...');
+            
+            try {
+                // Method 1: Direct click
+                console.log('content.js: extractSingleTranscriptByTitle - Trying direct click...');
+                foundElement.click();
+                console.log('content.js: extractSingleTranscriptByTitle - Direct click completed');
+            } catch (error) {
+                console.error('content.js: extractSingleTranscriptByTitle - Direct click failed:', error);
+                
+                // Method 2: Programmatic click event
+                console.log('content.js: extractSingleTranscriptByTitle - Trying programmatic click event...');
+                const clickEvent = new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                });
+                foundElement.dispatchEvent(clickEvent);
+                console.log('content.js: extractSingleTranscriptByTitle - Programmatic click completed');
+            }
+            
+            // Wait for page to load
+            console.log('content.js: extractSingleTranscriptByTitle - Waiting for conversation to load...');
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second wait
+            
+            // Wait for content to be ready
+            const maxWaitAttempts = 15;
+            let waitAttempts = 0;
+            let conversationContentFound = false;
+            
+            while (waitAttempts < maxWaitAttempts && !conversationContentFound) {
+                waitAttempts++;
+                const userQueries = document.querySelectorAll('user-query');
+                const modelResponses = document.querySelectorAll('model-response');
+                
+                if (userQueries.length > 0 || modelResponses.length > 0) {
+                    conversationContentFound = true;
+                    console.log(`content.js: extractSingleTranscriptByTitle - Content found after ${waitAttempts} attempts`);
+                } else {
+                    console.log(`content.js: extractSingleTranscriptByTitle - Wait attempt ${waitAttempts}/${maxWaitAttempts}`);
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                }
+            }
+            
+            if (!conversationContentFound) {
+                console.warn('content.js: extractSingleTranscriptByTitle - No content found after waiting');
+            }
+            
+            // IMPORTANT: Verify that we have focus before proceeding with scrolling
+            console.log('content.js: extractSingleTranscriptByTitle - Verifying focus state before scrolling...');
+            const currentActiveElement = document.activeElement;
+            console.log(`content.js: extractSingleTranscriptByTitle - Current active element: ${currentActiveElement?.tagName}, classes: ${currentActiveElement?.className}`);
+            
+            // If no proper focus, try to establish it before scrolling
+            if (!currentActiveElement || currentActiveElement === document.body) {
+                console.warn('content.js: extractSingleTranscriptByTitle - No focused element detected, attempting to establish focus...');
+                const conversationElements = document.querySelectorAll([
+                    'user-query',
+                    'model-response', 
+                    '[data-test-id="user-message"]',
+                    '[data-test-id="assistant-message"]',
+                    '.user-message',
+                    '.assistant-message',
+                    '[role="user"]',
+                    '[role="assistant"]'
+                ].join(', '));
+                
+                if (conversationElements.length > 0) {
+                    const elementToFocus = conversationElements[0];
+                    console.log('content.js: extractSingleTranscriptByTitle - Establishing focus on conversation element...');
+                    try {
+                        elementToFocus.click();
+                        elementToFocus.focus();
+                        elementToFocus.tabIndex = -1; // Make it focusable
+                        elementToFocus.focus();
+                        await new Promise(resolve => setTimeout(resolve, 300));
+                        
+                        const newActiveElement = document.activeElement;
+                        console.log(`content.js: extractSingleTranscriptByTitle - Focus established: ${newActiveElement?.tagName}, successful: ${newActiveElement === elementToFocus}`);
+                    } catch (error) {
+                        console.log('content.js: extractSingleTranscriptByTitle - Could not establish focus:', error.message);
+                    }
+                }
+            }
+            
+            // First, scroll to top to start from the oldest messages
+            console.log('content.js: extractSingleTranscriptByTitle - Scrolling to top to start from oldest messages...');
+            await scrollConversationToTop();
+            
+            // Load complete conversation by scrolling - use more aggressive parameters for complete loading
+            console.log('content.js: extractSingleTranscriptByTitle - Loading complete conversation...');
+            const loadedElementCount = await loadCompleteConversation(100, 1500); // Increased attempts and delay
+            console.log(`content.js: extractSingleTranscriptByTitle - Complete conversation loaded. Total elements: ${loadedElementCount}`);
+            
+            // Verify we have loaded a reasonable amount of content
+            if (loadedElementCount < 5) {
+                console.warn(`content.js: extractSingleTranscriptByTitle - WARNING: Only ${loadedElementCount} conversation elements loaded. This seems too few for a complete conversation.`);
+                console.log('content.js: extractSingleTranscriptByTitle - Attempting additional loading with longer delays...');
+                
+                // Try one more time with even longer delays
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                await scrollConversationToTop();
+                await loadCompleteConversation(50, 2000);
+                
+                // Recount after additional loading
+                const recheckUserQueries = document.querySelectorAll('user-query');
+                const recheckModelResponses = document.querySelectorAll('model-response');
+                const recheckAltPrompts = document.querySelectorAll('[data-test-id="user-message"], .user-message, [role="user"]');
+                const recheckAltResponses = document.querySelectorAll('[data-test-id="assistant-message"], .assistant-message, [role="assistant"]');
+                const recheckElementCount = recheckUserQueries.length + recheckModelResponses.length + recheckAltPrompts.length + recheckAltResponses.length;
+                console.log(`content.js: extractSingleTranscriptByTitle - After additional loading: ${recheckElementCount} elements`);
+            }
+            
+            // Extract transcript
+            console.log('content.js: extractSingleTranscriptByTitle - Extracting transcript...');
+            const transcriptContent = extractTranscript();
+            console.log('content.js: extractSingleTranscriptByTitle - Transcript length:', transcriptContent.length);
+            
+            // Additional validation and logging
+            if (transcriptContent.length < 500) {
+                console.warn(`content.js: extractSingleTranscriptByTitle - WARNING: Transcript is very short (${transcriptContent.length} characters). This may indicate incomplete loading.`);
+                console.log('content.js: extractSingleTranscriptByTitle - First 200 characters of transcript:', transcriptContent.substring(0, 200));
+            } else {
+                console.log(`content.js: extractSingleTranscriptByTitle - Transcript appears substantial (${transcriptContent.length} characters)`);
+            }
+            
+            // Download immediately
+            console.log('content.js: extractSingleTranscriptByTitle - Downloading transcript...');
+            const downloadSuccess = downloadTranscriptImmediately(targetTitle, transcriptContent, globalSavePrefix);
+            
+            // Store the transcript
+            const transcript = {
+                title: targetTitle,
+                content: transcriptContent,
+                timestamp: new Date().toISOString(),
+                downloaded: downloadSuccess
+            };
+            collectedTranscripts.push(transcript);
+            
+            // Navigate back
+            console.log('content.js: extractSingleTranscriptByTitle - Navigating back...');
+            window.history.back();
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait for back navigation
+            
+            // Send completion message
+            chrome.runtime.sendMessage({
+                action: "singleTranscriptComplete",
+                title: targetTitle,
+                downloadSuccess: downloadSuccess,
+                transcriptLength: transcriptContent.length,
+                elementsLoaded: loadedElementCount || 0 // Include element count for debugging
+            });
+            
+            console.log('content.js: extractSingleTranscriptByTitle - Single transcript extraction complete');
+            
+        } catch (error) {
+            console.error('content.js: extractSingleTranscriptByTitle - Error:', error);
+            try {
+                chrome.runtime.sendMessage({
+                    action: "singleTranscriptComplete",
+                    title: targetTitle,
+                    downloadSuccess: false,
+                    error: error.message
+                });
+            } catch (msgError) {
+                console.log('content.js: extractSingleTranscriptByTitle - Could not send error message to popup (popup may be closed)');
+            }
+        }
+    }
+
     async function processNextConversation() {
         console.log(`content.js: processNextConversation - Called for index ${currentIndex} of ${titlesToProcess.length}.`);
+
+        // Check if automation was aborted
+        if (isSearchAborted) {
+            console.warn('content.js: processNextConversation - Automation aborted by user.');
+            automationRunning = false; // Reset automation flag
+            chrome.runtime.sendMessage({ action: "searchAborted" });
+            return;
+        }
 
         // Check if all titles have been processed
         if (currentIndex >= titlesToProcess.length) {
             console.log('content.js: processNextConversation - All titles processed. Sending automationComplete message.');
-            // Send all collected transcripts to popup.js
-            chrome.runtime.sendMessage({
-                action: "automationComplete",
-                message: "All search result conversations processed. Transcripts ready for download.",
-                transcripts: collectedTranscripts // Send the array of collected transcripts
-            });
-            console.log('content.js: processNextConversation - "automationComplete" message sent.');
+            automationRunning = false; // Reset automation flag
+            
+            // Add a small delay to let the browser stabilize before sending completion message
+            setTimeout(() => {
+                // Force garbage collection if available (helps with memory)
+                if (window.gc) {
+                    try {
+                        window.gc();
+                        console.log('content.js: processNextConversation - Garbage collection triggered');
+                    } catch (e) {
+                        console.log('content.js: processNextConversation - Garbage collection not available');
+                    }
+                }
+                
+                // Send only metadata to popup.js, keep actual content in content script
+                const transcriptMetadata = collectedTranscripts.map((transcript, index) => ({
+                    id: index,
+                    title: transcript.title,
+                    length: transcript.content.length,
+                    preview: transcript.content.substring(0, 200) + '...'
+                }));
+                
+                chrome.runtime.sendMessage({
+                    action: "automationComplete",
+                    message: "All search result conversations processed. Transcripts ready for download.",
+                    transcripts: transcriptMetadata // Send only metadata
+                });
+                console.log('content.js: processNextConversation - "automationComplete" message sent with metadata for', transcriptMetadata.length, 'transcripts.');
+            }, 500); // 500ms delay to let browser stabilize
+            
             return; // Exit the function
         }
 
@@ -724,7 +1444,15 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
                         const responsesToCheck = modelResponses.length > 0 ? modelResponses : altResponses;
                         if (responsesToCheck.length > 0) {
                             console.log('content.js: processNextConversation - Waiting for response content to finish loading...');
-                            await waitForResponseContent(responsesToCheck, 3000); // Wait up to 3 seconds for content
+                            const contentReady = await waitForResponseContent(responsesToCheck, 3000); // Wait up to 3 seconds for content
+                            if (!contentReady) {
+                                console.warn('content.js: processNextConversation - Response content wait timed out, proceeding anyway');
+                                console.warn('content.js: processNextConversation - This is normal for some conversations where content loads differently');
+                            } else {
+                                console.log('content.js: processNextConversation - Response content appears ready');
+                            }
+                        } else {
+                            console.log('content.js: processNextConversation - No responses to check, proceeding with extraction');
                         }
                     } else {
                         console.log(`content.js: processNextConversation - Wait attempt ${waitAttempts}/${maxWaitAttempts} - no content yet`);
@@ -738,37 +1466,74 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
                 console.log('content.js: processNextConversation - Finished wait after click.');
                 console.log('content.js: processNextConversation - Current URL after click and wait:', window.location.href);
 
+                // --- Initial Scroll to Top Step ---
+                console.log('content.js: processNextConversation - Scrolling to top to start from oldest messages...');
+                await scrollConversationToTop();
+
+                // --- Load Complete Conversation Step ---
+                console.log('content.js: processNextConversation - Loading complete conversation by scrolling up...');
+                const totalElements = await loadCompleteConversation(maxScrollAttempts, 1000); // Use user-configured attempts, 1 second delay
+                console.log('content.js: processNextConversation - Complete conversation loaded. Total elements:', totalElements);
+
                 // --- Transcript Extraction Step ---
                 console.log('content.js: processNextConversation - Starting transcript extraction...');
                 const transcriptContent = extractTranscript();
                 console.log('content.js: processNextConversation - Transcript extraction completed. Length:', transcriptContent.length);
                 console.log('content.js: processNextConversation - Transcript preview (first 200 chars):', transcriptContent.substring(0, 200));
                 
-                collectedTranscripts.push({
+                // Validate transcript content
+                if (transcriptContent.length < 50) {
+                    console.warn('content.js: processNextConversation - Warning: Very short transcript extracted (likely incomplete)');
+                    console.warn('content.js: processNextConversation - This might indicate the conversation content did not fully load');
+                } else {
+                    console.log('content.js: processNextConversation - Transcript appears to have substantial content');
+                }
+                
+                // IMMEDIATE DOWNLOAD: Download the transcript file right after extraction
+                console.log('content.js: processNextConversation - ⬇️ DOWNLOADING TRANSCRIPT IMMEDIATELY');
+                const downloadSuccess = downloadTranscriptImmediately(targetTitle, transcriptContent, globalSavePrefix);
+                console.log('content.js: processNextConversation - Download result:', downloadSuccess ? 'SUCCESS' : 'FAILED');
+                
+                // Add timestamp for tracking
+                const transcript = {
                     title: targetTitle,
-                    content: transcriptContent
-                });
-                console.log('content.js: processNextConversation - Transcript extracted and stored. Collected so far:', collectedTranscripts.length);
+                    content: transcriptContent,
+                    timestamp: new Date().toISOString(),
+                    downloaded: downloadSuccess
+                };
+                
+                collectedTranscripts.push(transcript);
+                console.log('content.js: processNextConversation - Transcript extracted, downloaded, and stored. Collected so far:', collectedTranscripts.length);
 
                 // Navigate back to the search results page
                 console.log('content.js: processNextConversation - Navigating back.');
                 window.history.back();
                 // Wait for the page to load after navigating back.
-                console.log(`content.js: processNextConversation - Waiting for 100ms after back navigation.`);
-                await new Promise(resolve => setTimeout(resolve, 100));
+                console.log(`content.js: processNextConversation - Waiting for 500ms after back navigation.`);
+                await new Promise(resolve => setTimeout(resolve, 500)); // Increased from 100ms to 500ms
                 console.log('content.js: processNextConversation - Finished wait after back navigation.');
                 console.log('content.js: processNextConversation - Current URL after back navigation:', window.location.href);
 
+                // Add a small delay before processing next conversation to prevent browser overload
+                console.log('content.js: processNextConversation - Adding stability delay before next conversation...');
+                await new Promise(resolve => setTimeout(resolve, 200)); // 200ms stability delay
+
                 currentIndex++; // Move to the next title
                 console.log('content.js: processNextConversation - Incrementing index to', currentIndex);
-                processNextConversation(); // Continue with the next title immediately
+                
+                // Use setTimeout to prevent call stack buildup
+                setTimeout(() => {
+                    processNextConversation(); // Continue with the next title
+                }, 100); // Small delay to prevent stack overflow
 
             } else {
                 console.warn('content.js: processNextConversation - Clickable parent not found for title:', targetTitle);
                 // If the clickable parent was not found, report an error and move to the next title
                 chrome.runtime.sendMessage({ action: "titleNotFoundInList", title: targetTitle, reason: "Clickable parent element not found for this title." });
                 currentIndex++; // Move to the next title
-                processNextConversation(); // Immediately try to process the next one
+                setTimeout(() => {
+                    processNextConversation(); // Use setTimeout to prevent stack buildup
+                }, 100);
             }
         } else {
             console.warn('content.js: processNextConversation - Title not found in conversation list:', targetTitle);
@@ -779,13 +1544,565 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
             // If the target title text was not found in the conversation list, report and move on
             chrome.runtime.sendMessage({ action: "titleNotFoundInList", title: targetTitle, reason: "Title text not found in the conversation list." });
             currentIndex++; // Move to the next title
-            processNextConversation(); // Immediately try to process the next one
+            setTimeout(() => {
+                processNextConversation(); // Use setTimeout to prevent stack buildup
+            }, 100);
         }
+    }
+
+    /**
+     * Processes all conversations automatically in batch mode
+     * This runs independently of the popup being open/closed
+     */
+    async function processBatchAutomation() {
+        console.log('content.js: processBatchAutomation - Starting batch processing of all conversations');
+        console.log(`content.js: processBatchAutomation - Total conversations to process: ${titlesToProcess.length}`);
+        
+        if (automationRunning) {
+            console.warn('content.js: processBatchAutomation - Automation already running, skipping');
+            return;
+        }
+        
+        automationRunning = true;
+        
+        try {
+            for (let index = 0; index < titlesToProcess.length; index++) {
+                // Check if search was aborted
+                if (isSearchAborted) {
+                    console.warn('content.js: processBatchAutomation - Automation aborted by user');
+                    break;
+                }
+                
+                const targetTitle = titlesToProcess[index];
+                console.log(`content.js: processBatchAutomation - Processing ${index + 1}/${titlesToProcess.length}: "${targetTitle}"`);
+                console.log(`content.js: processBatchAutomation - Starting extraction for conversation: "${targetTitle}"`);
+                
+                // Extract the transcript for this conversation
+                await extractSingleTranscriptByTitle(targetTitle, index, titlesToProcess.length);
+                
+                // Log the result
+                const lastTranscript = collectedTranscripts[collectedTranscripts.length - 1];
+                if (lastTranscript) {
+                    console.log(`content.js: processBatchAutomation - Completed "${targetTitle}": ${lastTranscript.content.length} characters extracted`);
+                } else {
+                    console.warn(`content.js: processBatchAutomation - No transcript collected for "${targetTitle}"`);
+                }
+                
+                // Longer delay between conversations to ensure complete loading
+                console.log('content.js: processBatchAutomation - Waiting between conversations...');
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Increased from 500ms to 1000ms
+            }
+            
+            // Send completion message
+            console.log('content.js: processBatchAutomation - All conversations processed successfully');
+            
+            // Send only metadata to popup (if it's open), keep actual content in content script
+            const transcriptMetadata = collectedTranscripts.map((transcript, index) => ({
+                id: index,
+                title: transcript.title,
+                length: transcript.content.length,
+                preview: transcript.content.substring(0, 200) + '...',
+                downloaded: transcript.downloaded || false,
+                timestamp: transcript.timestamp
+            }));
+            
+            try {
+                chrome.runtime.sendMessage({
+                    action: "automationComplete",
+                    message: "All search result conversations processed. Transcripts downloaded automatically.",
+                    transcripts: transcriptMetadata,
+                    totalProcessed: collectedTranscripts.length
+                });
+            } catch (error) {
+                console.log('content.js: processBatchAutomation - Could not send completion message to popup (popup may be closed)');
+            }
+            
+            // Log summary to console for user visibility
+            console.log(`content.js: processBatchAutomation - BATCH PROCESSING COMPLETE`);
+            console.log(`content.js: processBatchAutomation - Successfully processed: ${collectedTranscripts.length}/${titlesToProcess.length} conversations`);
+            console.log(`content.js: processBatchAutomation - All transcripts have been downloaded automatically`);
+            
+        } catch (error) {
+            console.error('content.js: processBatchAutomation - Error during batch processing:', error);
+        } finally {
+            automationRunning = false;
+        }
+    }
+
+    /**
+     * Counts all conversation elements in the current page
+     * @returns {Object} Object with detailed count breakdown
+     */
+    function countConversationElements() {
+        const userQueries = document.querySelectorAll('user-query');
+        const modelResponses = document.querySelectorAll('model-response');
+        const altPrompts = document.querySelectorAll('[data-test-id="user-message"], .user-message, [role="user"]');
+        const altResponses = document.querySelectorAll('[data-test-id="assistant-message"], .assistant-message, [role="assistant"]');
+        
+        // Also try some other potential selectors
+        const additionalPrompts = document.querySelectorAll('.user-prompt, .prompt, [data-role="user"]');
+        const additionalResponses = document.querySelectorAll('.assistant-response, .response, [data-role="assistant"]');
+        
+        const counts = {
+            userQueries: userQueries.length,
+            modelResponses: modelResponses.length,
+            altPrompts: altPrompts.length,
+            altResponses: altResponses.length,
+            additionalPrompts: additionalPrompts.length,
+            additionalResponses: additionalResponses.length,
+            total: userQueries.length + modelResponses.length + altPrompts.length + altResponses.length + additionalPrompts.length + additionalResponses.length
+        };
+        
+        return counts;
+    }
+
+    /**
+     * Scrolls up in the conversation to load all historical content
+     * Uses repeated Ctrl+Home operations to ensure complete loading
+     * @param {number} maxScrollAttempts - Maximum number of scroll attempts
+     * @param {number} scrollDelayMs - Delay between scroll attempts
+     * @returns {Promise<number>} Number of conversation elements loaded
+     */
+    async function loadCompleteConversation(maxScrollAttempts = 100, scrollDelayMs = 1500) {
+        console.log('content.js: loadCompleteConversation - Starting to load complete conversation with Ctrl+Home strategy');
+        console.log(`content.js: loadCompleteConversation - Max attempts: ${maxScrollAttempts}, Delay: ${scrollDelayMs}ms`);
+        
+        let previousElementCount = 0;
+        let stableCount = 0;
+        const maxStableAttempts = 10; // Increased from 5 to 10 for longer conversations
+        let focusSuccessful = false; // Initialize focus tracking variable
+        let focusedElement = null;
+        
+        for (let attempt = 0; attempt < maxScrollAttempts; attempt++) {
+            // Count current conversation elements
+            const userQueries = document.querySelectorAll('user-query');
+            const modelResponses = document.querySelectorAll('model-response');
+            const altPrompts = document.querySelectorAll('[data-test-id="user-message"], .user-message, [role="user"]');
+            const altResponses = document.querySelectorAll('[data-test-id="assistant-message"], .assistant-message, [role="assistant"]');
+            
+            const currentElementCount = userQueries.length + modelResponses.length + altPrompts.length + altResponses.length;
+            console.log(`content.js: loadCompleteConversation - Attempt ${attempt + 1}: Found ${currentElementCount} conversation elements`);
+            console.log(`content.js: loadCompleteConversation - Breakdown: userQueries=${userQueries.length}, modelResponses=${modelResponses.length}, altPrompts=${altPrompts.length}, altResponses=${altResponses.length}`);
+            
+            // Check if we've loaded more content
+            if (currentElementCount === previousElementCount) {
+                stableCount++;
+                console.log(`content.js: loadCompleteConversation - Element count stable (${stableCount}/${maxStableAttempts})`);
+                
+                // For the first few attempts, don't stop even if stable - keep trying to load more
+                if (stableCount >= maxStableAttempts && attempt >= 20) {
+                    console.log('content.js: loadCompleteConversation - Element count has been stable for sufficient attempts, assuming complete conversation loaded');
+                    break;
+                }
+            } else {
+                stableCount = 0; // Reset stable count since we found new content
+                console.log(`content.js: loadCompleteConversation - Found new content, continuing (${currentElementCount} vs previous ${previousElementCount})`);
+            }
+            
+            previousElementCount = currentElementCount;
+            
+            // Use Ctrl+Home to scroll to the very top of the page to trigger loading of older content
+            console.log(`content.js: loadCompleteConversation - Sending Ctrl+Home to scroll to top (attempt ${attempt + 1})`);
+            
+            // Before each scroll attempt, verify and re-establish focus if needed
+            const currentActiveElement = document.activeElement;
+            console.log(`content.js: loadCompleteConversation - Current active element before scroll: ${currentActiveElement?.tagName}`);
+            
+            if (!focusSuccessful || !currentActiveElement || currentActiveElement === document.body) {
+                console.log('content.js: loadCompleteConversation - Re-establishing focus before scroll attempt...');
+                
+                // Re-find conversation elements (they might have changed after loading more content)
+                const currentConversationElements = document.querySelectorAll([
+                    'user-query',
+                    'model-response', 
+                    '[data-test-id="user-message"]',
+                    '[data-test-id="assistant-message"]',
+                    '.user-message',
+                    '.assistant-message',
+                    '[role="user"]',
+                    '[role="assistant"]'
+                ].join(', '));
+                
+                if (currentConversationElements.length > 0) {
+                    try {
+                        const elementToFocus = currentConversationElements[0];
+                        elementToFocus.click();
+                        elementToFocus.focus();
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        focusedElement = elementToFocus;
+                        focusSuccessful = true;
+                        console.log('content.js: loadCompleteConversation - Re-established focus successfully');
+                    } catch (error) {
+                        console.log('content.js: loadCompleteConversation - Could not re-establish focus:', error.message);
+                    }
+                }
+            }
+            
+            // First, find and focus on a conversation element
+            const conversationElements = document.querySelectorAll([
+                'user-query',
+                'model-response', 
+                '[data-test-id="user-message"]',
+                '[data-test-id="assistant-message"]',
+                '.user-message',
+                '.assistant-message',
+                '[role="user"]',
+                '[role="assistant"]'
+            ].join(', '));
+            
+            console.log(`content.js: loadCompleteConversation - Found ${conversationElements.length} conversation elements for focusing`);
+            
+            if (conversationElements.length > 0) {
+                // Try to focus on the first conversation element
+                focusedElement = conversationElements[0];
+                console.log(`content.js: loadCompleteConversation - Attempting to focus on conversation element: ${focusedElement.tagName}`);
+                console.log(`content.js: loadCompleteConversation - Element classes: ${focusedElement.className}`);
+                console.log(`content.js: loadCompleteConversation - Element text preview: "${focusedElement.textContent?.substring(0, 50)}"`);
+                
+                // Multiple attempts to establish focus
+                for (let focusAttempt = 0; focusAttempt < 3; focusAttempt++) {
+                    try {
+                        console.log(`content.js: loadCompleteConversation - Focus attempt ${focusAttempt + 1}/3`);
+                        
+                        // Method 1: Click to focus
+                        focusedElement.click();
+                        console.log('content.js: loadCompleteConversation - Click completed');
+                        
+                        // Method 2: Programmatic focus
+                        focusedElement.focus();
+                        console.log('content.js: loadCompleteConversation - Focus() called');
+                        
+                        // Method 3: Scroll into view and click again
+                        focusedElement.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        focusedElement.click();
+                        
+                        // Verify focus was established
+                        const activeElement = document.activeElement;
+                        console.log(`content.js: loadCompleteConversation - Active element after focus: ${activeElement?.tagName}, same as target: ${activeElement === focusedElement}`);
+                        
+                        if (activeElement === focusedElement || 
+                            activeElement?.contains(focusedElement) || 
+                            focusedElement?.contains(activeElement)) {
+                            focusSuccessful = true;
+                            console.log('content.js: loadCompleteConversation - Focus established successfully');
+                            break;
+                        } else {
+                            console.log(`content.js: loadCompleteConversation - Focus attempt ${focusAttempt + 1} unsuccessful, retrying...`);
+                            await new Promise(resolve => setTimeout(resolve, 200));
+                        }
+                    } catch (error) {
+                        console.log(`content.js: loadCompleteConversation - Focus attempt ${focusAttempt + 1} failed:`, error.message);
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                }
+                
+                if (!focusSuccessful) {
+                    console.warn('content.js: loadCompleteConversation - Could not establish focus on conversation element, trying container fallback');
+                }
+            } else {
+                console.warn('content.js: loadCompleteConversation - No conversation elements found for focusing');
+            }
+            
+            // Fallback: Try focusing on the conversation container
+            if (!focusSuccessful) {
+                console.log('content.js: loadCompleteConversation - Attempting to focus on conversation container as fallback');
+                const conversationContainer = document.querySelector('main') || 
+                                            document.querySelector('[role="main"]') ||
+                                            document.querySelector('.conversation-container') ||
+                                            document.querySelector('.chat-container') ||
+                                            document.querySelector('div[role="main"]') ||
+                                            document.querySelector('article') ||
+                                            document.body;
+                
+                if (conversationContainer) {
+                    console.log(`content.js: loadCompleteConversation - Found container: ${conversationContainer.tagName}`);
+                    try {
+                        conversationContainer.click();
+                        conversationContainer.focus();
+                        conversationContainer.tabIndex = -1; // Make it focusable
+                        conversationContainer.focus();
+                        focusedElement = conversationContainer;
+                        
+                        const activeElement = document.activeElement;
+                        console.log(`content.js: loadCompleteConversation - Container focus result: ${activeElement?.tagName}, successful: ${activeElement === conversationContainer}`);
+                        focusSuccessful = (activeElement === conversationContainer);
+                        
+                        // Additional delay to ensure focus takes effect
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    } catch (error) {
+                        console.log('content.js: loadCompleteConversation - Container focus failed:', error.message);
+                    }
+                }
+            }
+            
+            if (!focusSuccessful) {
+                console.error('content.js: loadCompleteConversation - WARNING: Could not establish focus on any element. Ctrl+Home may not work properly!');
+                console.log('content.js: loadCompleteConversation - This might explain why scrolling fails for some conversations');
+            } else {
+                console.log('content.js: loadCompleteConversation - Focus successfully established, proceeding with Ctrl+Home');
+            }
+            
+            // Strategy 1: Send Ctrl+Home key combination to simulate user keyboard action
+            const ctrlHomeEvent = new KeyboardEvent('keydown', {
+                key: 'Home',
+                code: 'Home',
+                ctrlKey: true,
+                bubbles: true,
+                cancelable: true
+            });
+            
+            // Send the event to the focused element first (most important)
+            if (focusedElement) {
+                console.log('content.js: loadCompleteConversation - Sending Ctrl+Home to focused element');
+                focusedElement.dispatchEvent(ctrlHomeEvent);
+            }
+            
+            // Also send to document and active element as fallback
+            document.dispatchEvent(ctrlHomeEvent);
+            
+            // Also send keyup event to complete the key sequence
+            const ctrlHomeEventUp = new KeyboardEvent('keyup', {
+                key: 'Home',
+                code: 'Home',
+                ctrlKey: true,
+                bubbles: true,
+                cancelable: true
+            });
+            
+            if (focusedElement) {
+                focusedElement.dispatchEvent(ctrlHomeEventUp);
+            }
+            document.dispatchEvent(ctrlHomeEventUp);
+            
+            // Strategy 2: Traditional scrolling as fallback
+            window.scrollTo({ top: 0, behavior: 'instant' });
+            
+            // Strategy 3: Also try scrolling within the main conversation container if it exists
+            const conversationContainer = document.querySelector('main') || 
+                                        document.querySelector('[role="main"]') ||
+                                        document.querySelector('.conversation-container') ||
+                                        document.querySelector('.chat-container');
+            
+            if (conversationContainer) {
+                console.log('content.js: loadCompleteConversation - Also scrolling conversation container to top');
+                conversationContainer.scrollTo({ top: 0, behavior: 'instant' });
+                
+                // Also send Ctrl+Home to the conversation container specifically
+                conversationContainer.dispatchEvent(ctrlHomeEvent);
+                conversationContainer.dispatchEvent(ctrlHomeEventUp);
+            }
+            
+            // Strategy 4: Try additional scroll methods for virtualized content
+            if (attempt % 5 === 0) { // Every 5th attempt, try more aggressive methods
+                console.log(`content.js: loadCompleteConversation - Attempt ${attempt + 1}: Using additional scroll strategies`);
+                
+                // Try Page Up key events
+                const pageUpEvent = new KeyboardEvent('keydown', {
+                    key: 'PageUp',
+                    code: 'PageUp',
+                    bubbles: true,
+                    cancelable: true
+                });
+                
+                if (focusedElement) {
+                    focusedElement.dispatchEvent(pageUpEvent);
+                }
+                document.dispatchEvent(pageUpEvent);
+                
+                // Also try continuous Up arrow keys
+                for (let upPress = 0; upPress < 10; upPress++) {
+                    const upEvent = new KeyboardEvent('keydown', {
+                        key: 'ArrowUp',
+                        code: 'ArrowUp',
+                        bubbles: true,
+                        cancelable: true
+                    });
+                    
+                    if (focusedElement) {
+                        focusedElement.dispatchEvent(upEvent);
+                    }
+                    document.dispatchEvent(upEvent);
+                    
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                }
+            }
+            
+            // Wait for content to load
+            console.log(`content.js: loadCompleteConversation - Waiting ${scrollDelayMs}ms for content to load`);
+            await new Promise(resolve => setTimeout(resolve, scrollDelayMs));
+            
+            // Additional check: look for loading indicators
+            const loadingIndicators = document.querySelectorAll([
+                '.loading',
+                '.spinner',
+                '[data-loading="true"]',
+                '.conversation-loading',
+                '[aria-label*="loading"]',
+                '[aria-label*="Loading"]'
+            ].join(', '));
+            
+            if (loadingIndicators.length > 0) {
+                console.log(`content.js: loadCompleteConversation - Found ${loadingIndicators.length} loading indicators, waiting additional time`);
+                await new Promise(resolve => setTimeout(resolve, scrollDelayMs / 2));
+            }
+        }
+        
+        // Final count after loading
+        const finalUserQueries = document.querySelectorAll('user-query');
+        const finalModelResponses = document.querySelectorAll('model-response');
+        const finalAltPrompts = document.querySelectorAll('[data-test-id="user-message"], .user-message, [role="user"]');
+        const finalAltResponses = document.querySelectorAll('[data-test-id="assistant-message"], .assistant-message, [role="assistant"]');
+        
+        const finalElementCount = finalUserQueries.length + finalModelResponses.length + finalAltPrompts.length + finalAltResponses.length;
+        console.log(`content.js: loadCompleteConversation - Completed loading. Final count: ${finalElementCount} elements`);
+        console.log(`content.js: loadCompleteConversation - Final breakdown: userQueries=${finalUserQueries.length}, modelResponses=${finalModelResponses.length}, altPrompts=${finalAltPrompts.length}, altResponses=${finalAltResponses.length}`);
+        
+        return finalElementCount;
+    }
+
+    /**
+     * Performs initial scroll to top when a conversation page loads
+     * This ensures we start reading from the oldest messages (top) rather than newest (bottom)
+     */
+    async function scrollConversationToTop() {
+        console.log('content.js: scrollConversationToTop - Scrolling conversation to top to start from oldest messages');
+        
+        // Perform multiple Ctrl+Home operations to ensure we reach the very top
+        for (let attempt = 0; attempt < 5; attempt++) {
+            console.log(`content.js: scrollConversationToTop - Ctrl+Home attempt ${attempt + 1}/5`);
+            
+            // First, find and focus on a conversation element
+            const conversationElements = document.querySelectorAll([
+                'user-query',
+                'model-response', 
+                '[data-test-id="user-message"]',
+                '[data-test-id="assistant-message"]',
+                '.user-message',
+                '.assistant-message',
+                '[role="user"]',
+                '[role="assistant"]'
+            ].join(', '));
+            
+            console.log(`content.js: scrollConversationToTop - Found ${conversationElements.length} conversation elements for focusing`);
+            
+            let focusedElement = null;
+            let focusSuccessful = false;
+            
+            if (conversationElements.length > 0) {
+                // Focus on the first conversation element (which should be at the bottom when page loads)
+                focusedElement = conversationElements[0];
+                console.log(`content.js: scrollConversationToTop - Attempting to focus on conversation element: ${focusedElement.tagName}`);
+                
+                // Robust focus attempt
+                try {
+                    focusedElement.click();
+                    focusedElement.focus();
+                    focusedElement.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    await new Promise(resolve => setTimeout(resolve, 150));
+                    
+                    // Verify focus
+                    const activeElement = document.activeElement;
+                    focusSuccessful = (activeElement === focusedElement || 
+                                     activeElement?.contains(focusedElement) || 
+                                     focusedElement?.contains(activeElement));
+                    
+                    console.log(`content.js: scrollConversationToTop - Focus successful: ${focusSuccessful}`);
+                } catch (error) {
+                    console.log('content.js: scrollConversationToTop - Could not click/focus element, trying alternative');
+                }
+            }
+            
+            // Fallback: Try focusing on the conversation container
+            if (!focusSuccessful) {
+                console.log('content.js: scrollConversationToTop - Using container fallback for focus');
+                const conversationContainer = document.querySelector('main') || 
+                                            document.querySelector('[role="main"]') ||
+                                            document.querySelector('.conversation-container') ||
+                                            document.querySelector('.chat-container') ||
+                                            document.body;
+                if (conversationContainer) {
+                    try {
+                        conversationContainer.click();
+                        conversationContainer.focus();
+                        conversationContainer.tabIndex = -1; // Make it focusable
+                        conversationContainer.focus();
+                        focusedElement = conversationContainer;
+                        focusSuccessful = true;
+                        await new Promise(resolve => setTimeout(resolve, 150));
+                        console.log('content.js: scrollConversationToTop - Container focus successful');
+                    } catch (error) {
+                        console.log('content.js: scrollConversationToTop - Container focus failed:', error.message);
+                    }
+                }
+            }
+            
+            if (!focusSuccessful) {
+                console.warn('content.js: scrollConversationToTop - WARNING: Could not establish focus. Ctrl+Home may not work!');
+            }
+            
+            // Send Ctrl+Home key combination
+            const ctrlHomeEvent = new KeyboardEvent('keydown', {
+                key: 'Home',
+                code: 'Home',
+                ctrlKey: true,
+                bubbles: true,
+                cancelable: true
+            });
+            
+            const ctrlHomeEventUp = new KeyboardEvent('keyup', {
+                key: 'Home',
+                code: 'Home',
+                ctrlKey: true,
+                bubbles: true,
+                cancelable: true
+            });
+            
+            // Send events to the focused element if we have one
+            if (focusedElement) {
+                console.log('content.js: scrollConversationToTop - Sending Ctrl+Home to focused element');
+                focusedElement.dispatchEvent(ctrlHomeEvent);
+                focusedElement.dispatchEvent(ctrlHomeEventUp);
+            }
+            
+            // Also send to document and active element as fallback
+            document.dispatchEvent(ctrlHomeEvent);
+            document.dispatchEvent(ctrlHomeEventUp);
+            
+            if (document.activeElement && document.activeElement !== focusedElement) {
+                document.activeElement.dispatchEvent(ctrlHomeEvent);
+                document.activeElement.dispatchEvent(ctrlHomeEventUp);
+            }
+            
+            // Also try traditional scrolling as fallback
+            window.scrollTo({ top: 0, behavior: 'instant' });
+            
+            // Scroll conversation container if it exists
+            const conversationContainer = document.querySelector('main') || 
+                                        document.querySelector('[role="main"]') ||
+                                        document.querySelector('.conversation-container') ||
+                                        document.querySelector('.chat-container');
+            
+            if (conversationContainer) {
+                conversationContainer.scrollTo({ top: 0, behavior: 'instant' });
+                conversationContainer.dispatchEvent(ctrlHomeEvent);
+                conversationContainer.dispatchEvent(ctrlHomeEventUp);
+            }
+            
+            // Wait between attempts
+            await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        
+        console.log('content.js: scrollConversationToTop - Initial scroll to top completed');
     }
 
     // Listener for messages from popup.js
     chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
-        console.log('content.js: Received message from popup.js:', request.action, request);
+        console.log('content.js: ====== MESSAGE RECEIVED ======');
+        console.log('content.js: Action:', request.action);
+        console.log('content.js: Full request:', request);
+        console.log('content.js: Sender:', sender);
+        console.log('content.js: Timestamp:', new Date().toISOString());
 
         if (request.action === "searchPageContent") {
             const pageText = document.body.innerText;
@@ -859,13 +2176,27 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
             }
         } else if (request.action === "startAutomation") {
             console.log('content.js: Received "startAutomation" message.');
+            
+            // Check if automation is already running
+            if (automationRunning) {
+                console.warn('content.js: startAutomation - Automation is already running. Ignoring request.');
+                chrome.runtime.sendMessage({ action: "automationComplete", message: "Automation is already in progress. Please wait for it to complete." });
+                return;
+            }
+            
+            // Don't set automationRunning here - let processBatchAutomation handle it
+            isSearchAborted = false; // Reset abort flag
+            currentIndex = 0; // Reset index
+            collectedTranscripts = []; // Reset collected transcripts
+            
             globalSavePrefix = request.savePrefix || '';
             pauseDurationMs = request.pauseDuration || 500;
-            console.log('content.js: startAutomation - Global save prefix:', globalSavePrefix, 'Pause duration (ms):', pauseDurationMs);
+            maxScrollAttempts = request.scrollAttempts || 10;
+            console.log('content.js: startAutomation - Global save prefix:', globalSavePrefix, 'Pause duration (ms):', pauseDurationMs, 'Max scroll attempts:', maxScrollAttempts);
 
             if (titlesToProcess.length > 0) {
-                console.log('content.js: startAutomation - Initiating processNextConversation.');
-                processNextConversation();
+                console.log('content.js: startAutomation - Starting batch processing of all conversations.');
+                processBatchAutomation(); // Use new batch processing function
             } else {
                 console.log('content.js: startAutomation - No titles to process. Sending "automationComplete".');
                 chrome.runtime.sendMessage({ action: "automationComplete", message: "No search result titles were found to process for automation." });
@@ -873,6 +2204,66 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
         } else if (request.action === "abortSearch") { // New listener for abort message
             console.log('content.js: Received "abortSearch" message. Setting isSearchAborted to true.');
             isSearchAborted = true; // Set the flag to true to stop the scrolling loop
+        } else if (request.action === "getTranscriptContent") { // New listener for retrieving transcript content
+            console.log('content.js: Received "getTranscriptContent" message for ID:', request.transcriptId);
+            const transcriptId = request.transcriptId;
+            if (transcriptId >= 0 && transcriptId < collectedTranscripts.length) {
+                const transcript = collectedTranscripts[transcriptId];
+                sendResponse({
+                    content: transcript.content
+                });
+                console.log('content.js: Sent transcript content for ID:', transcriptId, 'Length:', transcript.content.length);
+            } else {
+                console.error('content.js: Invalid transcript ID requested:', transcriptId);
+                sendResponse({
+                    error: "Invalid transcript ID"
+                });
+            }
+        } else if (request.action === "downloadAllTranscripts") { // New listener for handling downloads
+            console.log('content.js: ============ DOWNLOAD ALL TRANSCRIPTS HANDLER START ============');
+            console.log('content.js: Received "downloadAllTranscripts" message');
+            console.log('content.js: Full request object:', request);
+            console.log('content.js: Save prefix:', request.savePrefix);
+            console.log('content.js: Number of transcripts:', collectedTranscripts.length);
+            
+            if (collectedTranscripts.length === 0) {
+                console.error('content.js: No transcripts available');
+                sendResponse({ 
+                    success: false, 
+                    error: "No transcripts available",
+                    transcriptCount: 0
+                });
+                return true;
+            }
+            
+            // Count how many were already downloaded during extraction
+            const downloadedCount = collectedTranscripts.filter(t => t.downloaded).length;
+            const totalCount = collectedTranscripts.length;
+            
+            console.log('content.js: Transcripts already downloaded during extraction:', downloadedCount);
+            console.log('content.js: Total transcripts:', totalCount);
+            
+            if (downloadedCount === totalCount) {
+                console.log('content.js: ✅ All transcripts were already downloaded during extraction!');
+                sendResponse({ 
+                    success: true, 
+                    downloadCount: downloadedCount,
+                    totalTranscripts: totalCount,
+                    message: "All transcripts were downloaded during extraction",
+                    alreadyDownloaded: true
+                });
+            } else {
+                console.log('content.js: ⚠️ Some transcripts were not downloaded during extraction');
+                console.log('content.js: This should not happen with the new immediate download system');
+                sendResponse({ 
+                    success: false, 
+                    downloadCount: downloadedCount,
+                    totalTranscripts: totalCount,
+                    error: "Some transcripts were not downloaded during extraction",
+                    alreadyDownloaded: false
+                });
+            }
+            return true;
         }
     });
 } else { // This block handles subsequent injections of the content script
@@ -930,12 +2321,135 @@ if (typeof window.geminiTranscriptExtractorContentScriptInitialized === 'undefin
 
         } else if (request.action === "startAutomation") {
             console.log('content.js: Received "startAutomation" message (already initialized).');
+            
+            // Check if automation is already running
+            if (automationRunning) {
+                console.warn('content.js: startAutomation - Automation is already running (already initialized). Ignoring request.');
+                try {
+                    chrome.runtime.sendMessage({ action: "automationComplete", message: "Automation is already in progress. Please wait for it to complete." });
+                } catch (error) {
+                    console.log('content.js: startAutomation - Could not send already running message to popup (popup may be closed)');
+                }
+                return;
+            }
+            
+            // Don't set automationRunning here - let processBatchAutomation handle it
+            isSearchAborted = false; // Reset abort flag
+            currentIndex = 0; // Reset index
+            collectedTranscripts = []; // Reset collected transcripts
+            
             globalSavePrefix = request.savePrefix || '';
             pauseDurationMs = request.pauseDuration || 500;
-            processNextConversation();
+            
+            if (titlesToProcess.length > 0) {
+                console.log('content.js: startAutomation - Starting batch processing of all conversations (already initialized).');
+                processBatchAutomation(); // Use new batch processing function
+            } else {
+                console.log('content.js: startAutomation - No titles to process (already initialized). Sending "automationComplete".');
+                try {
+                    chrome.runtime.sendMessage({ action: "automationComplete", message: "No search result titles were found to process for automation." });
+                } catch (error) {
+                    console.log('content.js: startAutomation - Could not send no titles message to popup (popup may be closed)');
+                }
+            }
         } else if (request.action === "abortSearch") {
             console.log('content.js: Received "abortSearch" message (already initialized). Setting isSearchAborted to true.');
             isSearchAborted = true;
+        } else if (request.action === "getTranscriptContent") { // New listener for retrieving transcript content
+            console.log('content.js: Received "getTranscriptContent" message (already initialized) for ID:', request.transcriptId);
+            const transcriptId = request.transcriptId;
+            if (transcriptId >= 0 && transcriptId < collectedTranscripts.length) {
+                const transcript = collectedTranscripts[transcriptId];
+                chrome.runtime.sendMessage({
+                    action: "transcriptContent",
+                    transcriptId: transcriptId,
+                    title: transcript.title,
+                    content: transcript.content
+                });
+                console.log('content.js: Sent transcript content (already initialized) for ID:', transcriptId, 'Length:', transcript.content.length);
+            } else {
+                console.error('content.js: Invalid transcript ID requested (already initialized):', transcriptId);
+                chrome.runtime.sendMessage({
+                    action: "transcriptContentError",
+                    transcriptId: transcriptId,
+                    error: "Invalid transcript ID"
+                });
+            }
+        } else if (request.action === "downloadAllTranscripts") { // Download handler for re-initialized script
+            console.log('content.js: ============ DOWNLOAD ALL TRANSCRIPTS HANDLER (REINITIALIZED) ============');
+            console.log('content.js: Received "downloadAllTranscripts" message in reinitialized script');
+            console.log('content.js: Full request object:', request);
+            console.log('content.js: Save prefix:', request.savePrefix);
+            console.log('content.js: Test message:', request.testMessage);
+            console.log('content.js: Number of transcripts to download:', collectedTranscripts.length);
+            
+            if (collectedTranscripts.length === 0) {
+                console.error('content.js: No transcripts available for download (reinitialized)');
+                sendResponse({ 
+                    success: false, 
+                    error: "No transcripts available for download",
+                    transcriptCount: 0,
+                    reinitialized: true
+                });
+                return true;
+            }
+            
+            // Helper function to sanitize filename
+            function sanitizeFilename(title) {
+                return title.replace(/[/\\?%*:|"<>]/g, '_')
+                           .replace(/\s+/g, '_')
+                           .toLowerCase();
+            }
+            
+            // Download each transcript
+            for (let i = 0; i < collectedTranscripts.length; i++) {
+                const transcript = collectedTranscripts[i];
+                const filename = request.savePrefix + sanitizeFilename(transcript.title) + '.txt';
+                
+                console.log(`content.js: Downloading transcript ${i + 1}/${collectedTranscripts.length}: ${transcript.title} (reinitialized)`);
+                console.log(`content.js: Filename: ${filename}, Content length: ${transcript.content.length}`);
+                
+                try {
+                    // Create blob and download link
+                    const blob = new Blob([transcript.content], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    
+                    // Create temporary download link
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = url;
+                    downloadLink.download = filename;
+                    downloadLink.style.display = 'none';
+                    
+                    // Add to DOM, click, and remove
+                    document.body.appendChild(downloadLink);
+                    downloadLink.click();
+                    document.body.removeChild(downloadLink);
+                    
+                    // Clean up blob URL after a delay
+                    setTimeout(() => {
+                        URL.revokeObjectURL(url);
+                    }, 1000);
+                    
+                    console.log(`content.js: Download initiated for ${filename} (reinitialized)`);
+                    
+                    // Small delay between downloads
+                    if (i < collectedTranscripts.length - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                    
+                } catch (error) {
+                    console.error(`content.js: Error downloading ${filename} (reinitialized):`, error);
+                }
+            }
+            
+            console.log('content.js: All downloads initiated from reinitialized content script');
+            sendResponse({ 
+                success: true, 
+                downloadCount: collectedTranscripts.length,
+                reinitialized: true,
+                message: "All downloads initiated successfully from reinitialized script"
+            });
+            return true; // Keep message channel open
         }
     });
 }

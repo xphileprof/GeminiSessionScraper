@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pauseDurationInput = document.getElementById('pauseDuration'); // Added to fix ReferenceError
 
     let cachedTitlesFromSearchResults = []; // To store titles retrieved from search results for automation
+    // Removed currentExtractionIndex - now using batch automation instead
 
     // Utility to show/hide and reset abort button state
     function setAbortButtonVisible(visible) {
@@ -128,9 +129,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Call initializePopup when the DOM is loaded
     initializePopup();
 
-    // Event listener for the "Extract Transcripts" button
+    // Event listener for the "Extract All Transcripts" button (uses batch automation)
     startAutomationBtn.addEventListener('click', async () => {
-        console.log('popup.js: "Extract Transcripts" button clicked.');
+        console.log('popup.js: Extract All Transcripts button clicked. Total titles:', cachedTitlesFromSearchResults.length);
+        
+        if (cachedTitlesFromSearchResults.length === 0) {
+            console.log('popup.js: No transcripts to extract');
+            resultDiv.textContent = 'No transcripts found to extract!';
+            resultDiv.classList.add('failure');
+            return;
+        }
+        
         let savePrefix = savePrefixInput.value.trim();
         // Ensure the prefix ends with a slash if it's not empty
         if (savePrefix && !savePrefix.endsWith('/')) {
@@ -138,7 +147,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         // Basic validation for the save prefix
         if (!savePrefix) {
-            resultDiv.textContent = 'Please enter a Transcript File Prefix before starting automation.';
+            resultDiv.textContent = 'Please enter a Transcript File Prefix before starting extraction.';
             resultDiv.classList.add('failure');
             return;
         }
@@ -151,21 +160,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        startAutomationBtn.disabled = true; // Disable this button once clicked
-        setAbortButtonVisible(false); // Hide abort button during automation
+        startAutomationBtn.disabled = true; // Disable this button while processing
+        startAutomationBtn.textContent = 'Processing All Transcripts...';
+        setAbortButtonVisible(false); // Hide abort button during extraction
 
-        resultDiv.textContent = 'Starting automation...';
+        resultDiv.textContent = `Starting batch extraction of all ${cachedTitlesFromSearchResults.length} transcripts...`;
         resultDiv.classList.add('info');
 
         let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab) {
-            console.log('popup.js: Sending "startAutomation" message to content.js with pauseDuration:', pauseDuration);
-            // Send a message to content.js to start the automation process
-            // Pass both savePrefix and pauseDuration to the content script
+            console.log('popup.js: Sending "startAutomation" message to content.js for batch processing');
+            console.log('popup.js: Save prefix:', savePrefix);
+            console.log('popup.js: Pause duration:', pauseDuration);
+            console.log('popup.js: Total transcripts:', cachedTitlesFromSearchResults.length);
+            
+            // Send a message to content.js to start batch automation
             chrome.tabs.sendMessage(tab.id, {
                 action: "startAutomation",
                 savePrefix: savePrefix,
-                pauseDuration: pauseDuration * 1000 // Convert seconds to milliseconds
+                pauseDuration: pauseDuration * 1000, // Convert seconds to milliseconds
+                scrollAttempts: 50 // Default scroll attempts
             });
         }
     });
@@ -207,9 +221,19 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (request.allTitlesMatched) {
                     resultDiv.textContent = `Page verified. ${request.titles.length} search results found and matched in conversation list. Ready to extract.`;
                     resultDiv.classList.add('success');
+                    cachedTitlesFromSearchResults = request.titles; // Store titles for one-by-one extraction
+                    // No need to reset extraction index - using batch automation
+                    
                     if (request.titles.length > 0) {
                         startAutomationBtn.classList.remove('hidden');
                         startAutomationBtn.disabled = false;
+                        
+                        // Update button text for batch extraction
+                        if (request.titles.length === 1) {
+                            startAutomationBtn.textContent = 'Extract 1 Transcript';
+                        } else {
+                            startAutomationBtn.textContent = `Extract All ${request.titles.length} Transcripts`;
+                        }
                     }
                 } else {
                     resultDiv.textContent = `Page verified, but not all search results matched in conversation list. Automation may not be complete.`;
@@ -225,14 +249,24 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         } else if (request.action === "processingTitle") {
             console.log('popup.js: processingTitle - Currently processing:', request.title);
-            resultDiv.textContent = `Extracting: "${request.title}" (${request.current} of ${request.total})...`;
+            resultDiv.textContent = `Extracting & Downloading: "${request.title}" (${request.current} of ${request.total})...`;
             resultDiv.classList.add('info');
             startAutomationBtn.classList.add('hidden');
             setAbortButtonVisible(false);
             // Ensure hidden during processing
             // Remove: searchStatusDiv.classList.add('hidden');
         } else if (request.action === "automationComplete") {
-            console.log('popup.js: automationComplete - All conversations processed. Transcripts received:', request.transcripts.length);
+            console.log('popup.js: ====== AUTOMATION COMPLETE MESSAGE RECEIVED ======');
+            console.log('popup.js: Timestamp:', new Date().toISOString());
+            console.log('popup.js: Message:', request.message);
+            console.log('popup.js: Number of transcripts received:', request.transcripts?.length || 0);
+            console.log('popup.js: Transcript metadata preview:', request.transcripts?.map(t => ({ 
+                title: t.title, 
+                timestamp: t.timestamp,
+                hasContent: !!t.content,
+                contentLength: t.content?.length || 0
+            })) || []);
+            
             resultDiv.textContent = request.message || 'Automation complete!';
             resultDiv.classList.add('success');
             startAutomationBtn.classList.add('hidden');
@@ -245,108 +279,79 @@ document.addEventListener('DOMContentLoaded', async () => {
                 
                 // Create a download section in the popup
                 resultDiv.innerHTML = `
-                    <div class="success">🎉 Automation complete! ${request.transcripts.length} transcripts extracted.</div>
+                    <div class="success">🎉 Automation complete! ${request.transcripts.length} transcripts extracted and downloaded.</div>
                     <div class="download-section">
-                        <h3>📥 Download Transcripts:</h3>
-                        <button id="downloadAllBtn" class="download-all-btn">📦 Download All Files</button>
-                        <div id="downloadLinks" class="download-links"></div>
-                        <div class="info" style="margin-top: 15px; font-size: 0.9rem;">
-                            💡 Downloads will start automatically. Check your Downloads folder.
+                        <h3>📥 Downloads Status:</h3>
+                        <div class="info" style="margin: 10px 0; padding: 10px; background: #e8f5e9; border: 1px solid #4caf50; border-radius: 4px;">
+                            ✅ Files were downloaded automatically during extraction<br>
+                            📁 Check your Downloads folder for ${request.transcripts.length} files
                         </div>
+                        <button id="verifyDownloadsBtn" class="download-all-btn">🔍 Verify Downloads</button>
+                        <div id="downloadStatus" class="download-links"></div>
                     </div>
                 `;
                 
                 // Show close button after completion
                 setCloseButtonVisible(true);
                 
-                const downloadLinksDiv = document.getElementById('downloadLinks');
-                const downloadAllBtn = document.getElementById('downloadAllBtn');
+                const verifyDownloadsBtn = document.getElementById('verifyDownloadsBtn');
+                const downloadStatusDiv = document.getElementById('downloadStatus');
                 
-                // Create individual download links
-                const downloadData = request.transcripts.map((transcriptData, index) => {
-                    const filename = currentSavePrefix + sanitizeFilename(transcriptData.title) + '.txt';
-                    const blob = new Blob([transcriptData.content], { type: 'text/plain' });
-                    const url = URL.createObjectURL(blob);
+                // Verify downloads when button is clicked
+                verifyDownloadsBtn.addEventListener('click', async () => {
+                    console.log('popup.js: ====== VERIFY DOWNLOADS BUTTON CLICKED ======');
+                    console.log('popup.js: Timestamp:', new Date().toISOString());
+                    console.log('popup.js: Checking download status with content.js');
                     
-                    // Create download link
-                    const linkDiv = document.createElement('div');
-                    linkDiv.className = 'download-link-item';
+                    verifyDownloadsBtn.textContent = '� Checking...';
+                    verifyDownloadsBtn.disabled = true;
                     
-                    const link = document.createElement('a');
-                    link.href = url;
-                    link.download = filename;
-                    link.textContent = `📄 ${transcriptData.title}`;
-                    link.className = 'download-link';
-                    link.title = `Click to download: ${filename}`;
+                    // Get current tab to send message to content.js
+                    let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                    if (!tab) {
+                        console.error('popup.js: Could not get current tab for verification');
+                        verifyDownloadsBtn.textContent = '❌ Error: No Tab';
+                        return;
+                    }
                     
-                    linkDiv.appendChild(link);
-                    downloadLinksDiv.appendChild(linkDiv);
+                    // Send verification message
+                    const verificationMessage = {
+                        action: "downloadAllTranscripts",
+                        savePrefix: currentSavePrefix
+                    };
                     
-                    return { url, filename, blob, transcriptData };
+                    try {
+                        const response = await chrome.tabs.sendMessage(tab.id, verificationMessage);
+                        console.log('popup.js: Verification response:', response);
+                        
+                        if (response?.success && response?.alreadyDownloaded) {
+                            verifyDownloadsBtn.textContent = '✅ All Downloads Verified!';
+                            verifyDownloadsBtn.style.backgroundColor = '#059669';
+                            downloadStatusDiv.innerHTML = `
+                                <div style="margin-top: 10px; padding: 10px; background: #e8f5e9; border: 1px solid #4caf50; border-radius: 4px;">
+                                    <strong>✅ Download Verification Complete</strong><br>
+                                    📊 ${response.downloadCount}/${response.totalTranscripts} files downloaded successfully<br>
+                                    📁 Files saved with prefix: <code>${currentSavePrefix}</code><br>
+                                    💡 Files should be in your Downloads folder
+                                </div>
+                            `;
+                        } else {
+                            verifyDownloadsBtn.textContent = '⚠️ Verification Issues';
+                            verifyDownloadsBtn.style.backgroundColor = '#f59e0b';
+                            downloadStatusDiv.innerHTML = `
+                                <div style="margin-top: 10px; padding: 10px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 4px;">
+                                    <strong>⚠️ Download Verification Results</strong><br>
+                                    📊 ${response?.downloadCount || 0}/${response?.totalTranscripts || 0} files verified<br>
+                                    ❌ Error: ${response?.error || 'Unknown verification error'}
+                                </div>
+                            `;
+                        }
+                    } catch (error) {
+                        console.error('popup.js: Error during verification:', error);
+                        verifyDownloadsBtn.textContent = '❌ Verification Failed';
+                        verifyDownloadsBtn.style.backgroundColor = '#dc2626';
+                    }
                 });
-                
-                // Download all files when button is clicked
-                downloadAllBtn.addEventListener('click', () => {
-                    console.log('popup.js: Download All button clicked - starting downloads');
-                    downloadAllBtn.textContent = '⬇️ Starting Downloads...';
-                    downloadAllBtn.disabled = true;
-                    
-                    let downloadCount = 0;
-                    downloadData.forEach((data, index) => {
-                        // Stagger downloads slightly to avoid overwhelming the browser
-                        setTimeout(() => {
-                            try {
-                                // Use chrome.downloads API for better control
-                                chrome.downloads.download({
-                                    url: data.url,
-                                    filename: data.filename,
-                                    saveAs: false // Don't prompt for each file
-                                }, (downloadId) => {
-                                    downloadCount++;
-                                    if (chrome.runtime.lastError) {
-                                        console.error(`popup.js: Download failed for "${data.transcriptData.title}":`, chrome.runtime.lastError.message);
-                                    } else {
-                                        console.log(`popup.js: Download started for ${data.filename}, ID: ${downloadId}`);
-                                    }
-                                    
-                                    // Clean up URL after download
-                                    URL.revokeObjectURL(data.url);
-                                    
-                                    // Update button when all downloads are initiated
-                                    if (downloadCount === downloadData.length) {
-                                        downloadAllBtn.textContent = '✅ All Downloads Started!';
-                                        downloadAllBtn.className = 'download-all-btn';
-                                        downloadAllBtn.style.backgroundColor = '#059669';
-                                        
-                                        // Add completion message
-                                        const completionMsg = document.createElement('div');
-                                        completionMsg.className = 'success';
-                                        completionMsg.style.marginTop = '10px';
-                                        completionMsg.style.fontSize = '0.9rem';
-                                        completionMsg.innerHTML = '🎉 All downloads initiated! Check your Downloads folder.<br>You can now close this extension.';
-                                        downloadAllBtn.parentNode.appendChild(completionMsg);
-                                    }
-                                });
-                            } catch (error) {
-                                console.error('popup.js: Error initiating download:', error);
-                                // Fallback to regular link click
-                                const tempLink = document.createElement('a');
-                                tempLink.href = data.url;
-                                tempLink.download = data.filename;
-                                tempLink.style.display = 'none';
-                                document.body.appendChild(tempLink);
-                                tempLink.click();
-                                document.body.removeChild(tempLink);
-                                URL.revokeObjectURL(data.url);
-                            }
-                        }, index * 100); // 100ms delay between downloads
-                    });
-                });
-                
-                // Also trigger automatic download of all files
-                setTimeout(() => {
-                    downloadAllBtn.click();
-                }, 500); // Give UI time to render first
                 
             } else {
                 console.log('popup.js: automationComplete - No transcripts collected for download.');
