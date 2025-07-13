@@ -17,3 +17,13 @@ copilotSession.md
 # Test files
 test-popup.html
 test_popup_standalone.html
+
+# Security - API keys and secrets
+*.key
+*.pem
+.env
+.env.*
+config.json
+secrets.json
+# Google API keys pattern
+AIza*

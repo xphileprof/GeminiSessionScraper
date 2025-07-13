@@ -23,7 +23,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pauseDurationInput = document.getElementById('pauseDuration'); // Added to fix ReferenceError
 
     let cachedTitlesFromSearchResults = []; // To store titles retrieved from search results for automation
-    let currentExtractionIndex = 0; // Track which transcript we're currently extracting
+    // Removed currentExtractionIndex - now using batch automation instead
 
     // Utility to show/hide and reset abort button state
     function setAbortButtonVisible(visible) {
@@ -129,16 +129,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Call initializePopup when the DOM is loaded
     initializePopup();
 
-    // Event listener for the "Extract Transcripts" button (now extracts one at a time)
+    // Event listener for the "Extract All Transcripts" button (uses batch automation)
     startAutomationBtn.addEventListener('click', async () => {
-        console.log('popup.js: Extract button clicked. Current index:', currentExtractionIndex, 'Total titles:', cachedTitlesFromSearchResults.length);
+        console.log('popup.js: Extract All Transcripts button clicked. Total titles:', cachedTitlesFromSearchResults.length);
         
-        if (currentExtractionIndex >= cachedTitlesFromSearchResults.length) {
-            console.log('popup.js: All transcripts have been extracted');
-            resultDiv.textContent = 'All transcripts have been extracted and downloaded!';
-            resultDiv.classList.add('success');
-            startAutomationBtn.classList.add('hidden');
-            setCloseButtonVisible(true);
+        if (cachedTitlesFromSearchResults.length === 0) {
+            console.log('popup.js: No transcripts to extract');
+            resultDiv.textContent = 'No transcripts found to extract!';
+            resultDiv.classList.add('failure');
             return;
         }
         
@@ -163,27 +161,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         startAutomationBtn.disabled = true; // Disable this button while processing
+        startAutomationBtn.textContent = 'Processing All Transcripts...';
         setAbortButtonVisible(false); // Hide abort button during extraction
 
-        const targetTitle = cachedTitlesFromSearchResults[currentExtractionIndex];
-        resultDiv.textContent = `Extracting & Downloading: "${targetTitle}" (${currentExtractionIndex + 1} of ${cachedTitlesFromSearchResults.length})...`;
+        resultDiv.textContent = `Starting batch extraction of all ${cachedTitlesFromSearchResults.length} transcripts...`;
         resultDiv.classList.add('info');
 
         let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab) {
-            console.log('popup.js: Sending "extractSingleTranscript" message to content.js');
-            console.log('popup.js: Target title:', targetTitle);
+            console.log('popup.js: Sending "startAutomation" message to content.js for batch processing');
             console.log('popup.js: Save prefix:', savePrefix);
             console.log('popup.js: Pause duration:', pauseDuration);
+            console.log('popup.js: Total transcripts:', cachedTitlesFromSearchResults.length);
             
-            // Send a message to content.js to extract a single transcript
+            // Send a message to content.js to start batch automation
             chrome.tabs.sendMessage(tab.id, {
-                action: "extractSingleTranscript",
-                targetTitle: targetTitle,
+                action: "startAutomation",
                 savePrefix: savePrefix,
                 pauseDuration: pauseDuration * 1000, // Convert seconds to milliseconds
-                currentIndex: currentExtractionIndex,
-                totalCount: cachedTitlesFromSearchResults.length
+                scrollAttempts: 50 // Default scroll attempts
             });
         }
     });
@@ -226,17 +222,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                     resultDiv.textContent = `Page verified. ${request.titles.length} search results found and matched in conversation list. Ready to extract.`;
                     resultDiv.classList.add('success');
                     cachedTitlesFromSearchResults = request.titles; // Store titles for one-by-one extraction
-                    currentExtractionIndex = 0; // Reset extraction index
+                    // No need to reset extraction index - using batch automation
                     
                     if (request.titles.length > 0) {
                         startAutomationBtn.classList.remove('hidden');
                         startAutomationBtn.disabled = false;
                         
-                        // Update button text based on number of transcripts
+                        // Update button text for batch extraction
                         if (request.titles.length === 1) {
-                            startAutomationBtn.textContent = 'Extract Transcript';
+                            startAutomationBtn.textContent = 'Extract 1 Transcript';
                         } else {
-                            startAutomationBtn.textContent = 'Extract First Transcript';
+                            startAutomationBtn.textContent = `Extract All ${request.titles.length} Transcripts`;
                         }
                     }
                 } else {
@@ -259,41 +255,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             setAbortButtonVisible(false);
             // Ensure hidden during processing
             // Remove: searchStatusDiv.classList.add('hidden');
-        } else if (request.action === "singleTranscriptComplete") {
-            console.log('popup.js: Single transcript extraction complete:', request.title);
-            console.log('popup.js: Download success:', request.downloadSuccess);
-            
-            currentExtractionIndex++; // Move to next transcript
-            
-            if (request.downloadSuccess) {
-                resultDiv.textContent = `✅ Downloaded: "${request.title}" (${currentExtractionIndex} of ${cachedTitlesFromSearchResults.length})`;
-                resultDiv.classList.add('success');
-            } else {
-                resultDiv.textContent = `⚠️ Extracted but download failed: "${request.title}" (${currentExtractionIndex} of ${cachedTitlesFromSearchResults.length})`;
-                resultDiv.classList.add('failure');
-            }
-            
-            // Re-enable and update the button for next extraction
-            startAutomationBtn.disabled = false;
-            
-            if (currentExtractionIndex >= cachedTitlesFromSearchResults.length) {
-                // All transcripts completed
-                startAutomationBtn.textContent = '✅ All Complete';
-                startAutomationBtn.disabled = true;
-                setCloseButtonVisible(true);
-                
-                const completedMessage = `🎉 All ${cachedTitlesFromSearchResults.length} transcripts extracted and downloaded! Check your Downloads folder.`;
-                resultDiv.textContent = completedMessage;
-                resultDiv.classList.add('success');
-            } else {
-                // More transcripts to extract
-                if (cachedTitlesFromSearchResults.length - currentExtractionIndex === 1) {
-                    startAutomationBtn.textContent = 'Extract Last Transcript';
-                } else {
-                    startAutomationBtn.textContent = 'Extract Next Transcript';
-                }
-                startAutomationBtn.classList.remove('hidden');
-            }
         } else if (request.action === "automationComplete") {
             console.log('popup.js: ====== AUTOMATION COMPLETE MESSAGE RECEIVED ======');
             console.log('popup.js: Timestamp:', new Date().toISOString());
